@@ -24,3 +24,5 @@ from alphagenome_pytorch.alphagenome import (
 from alphagenome_pytorch.config import AlphaGenomeConfig
 
 from alphagenome_pytorch.data import DummyGenomeDataset, DummyTargetsDataset
+
+from alphagenome_pytorch.splice_dataset import SpliceDataset
