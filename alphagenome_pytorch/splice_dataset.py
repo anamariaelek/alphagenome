@@ -39,38 +39,71 @@ class SpliceDataset(Dataset):
             'rat': 2
         }
         
-        # Load metadata
+        # Load metadata JSON
         meta_path = os.path.join(self.data_dir, 'metadata.json')
         with open(meta_path, 'r') as f:
             self.meta = json.load(f)
         
+        # Load metadata CSV
+        meta_csv_path = os.path.join(self.data_dir, 'metadata.csv')
+        self.meta_csv = pd.read_csv(meta_csv_path)
+        self.species = self.meta_csv['species_id']
+
+        #
+        # Sequences
+        #
+
         # Load sequences (one-hot encoded)
         seq_path = os.path.join(self.data_dir, 'sequences.mmap')
         seq_dtype = np.dtype(self.meta.get('sequences_dtype'))
         seq_shape = tuple(self.meta.get('sequences_shape'))
         self.sequences = np.memmap(seq_path, dtype=seq_dtype, mode='r', shape=seq_shape)
-        
-        # Load labels (splice site annotations)
-        lbl_path = os.path.join(self.data_dir, 'labels.parquet')
-        self.labels = pd.read_parquet(lbl_path)
-        
+
         # Handle context size if present
         context_size = self.meta.get('context_size', 0)
         if context_size > 0:
             self.sequences = self.sequences[:, context_size:-context_size]
+
+        #
+        # Labels
+        #
         
+        # Load labels (splice site annotations)
+        lbl_path = os.path.join(self.data_dir, 'labels.parquet') # 0=not splice site 1=donor 2=acceptor
+        self.labels = pd.read_parquet(lbl_path)
+
+        # Split by strand
+        self.labels['strand'] = self.labels['sample_idx'].map(self.meta_csv['strand'])
+        self.labels.loc[self.labels['strand'] == '-', 'label'] += 2 # 0=not splice site, 1=donor+, 2=acceptor+, 3=donor-, 4=acceptor-
+
+        # Match alphagenome classes
+        self.labels['label'] = self.labels['label'].replace({0:4, 1:0, 2:1, 3:2, 4:3}) # 0=donor+ 1=acceptor+ 2=donor- 3=acceptor- 4=not splice site
+            
+        # Account for different splice site encoding
+        self.labels.loc[self.labels['label'] == 0, 'position'] += -2 
+        self.labels.loc[self.labels['label'] == 3, 'position'] += -2 
+
+        #
+        # Usage (SSE)
+        #
+
         # Load SSE (splice site strength estimate) if available
         sse_path = os.path.join(self.data_dir, 'usage.parquet')
         if os.path.exists(sse_path):
             self.sse = pd.read_parquet(sse_path)
         else:
             self.sse = None
-        
-        # Load metadata CSV
-        meta_csv_path = os.path.join(self.data_dir, 'metadata.csv')
-        self.meta_csv = pd.read_csv(meta_csv_path)
-        self.species = self.meta_csv['species_id']
-        
+
+        # Add splice class
+        labels_ = self.labels.set_index(['sample_idx', 'position'], inplace=False)
+        usage_ = self.sse.set_index(['sample_idx', 'position'], inplace=False)
+        self.sse = usage_.join(labels_, how='left').reset_index()
+
+        # Account for different splice site encoding
+        self.sse.loc[self.sse['label'] == 0, 'position'] += -2 
+        self.sse.loc[self.sse['label'] == 3, 'position'] += -2 
+
+
         # Load conditions for species 
         meta_path = os.path.join(self.data_dir, 'metadata.json')
         with open(meta_path, 'r') as f:
@@ -85,13 +118,20 @@ class SpliceDataset(Dataset):
     def __getitem__(self, idx):
         # Convert one-hot to integer encoding
         seq = self.sequences[idx]  # (seq_len, 4) or (4, seq_len)
-        
-        # Handle both (seq_len, 4) and (4, seq_len) formats
+               
+        # Reverse complement strand - sequences
+        if self.meta_csv.loc[idx, 'strand'] == '-':
+            if seq.shape[-1] == 4:
+                seq = seq[:, ::-1]  # Complement (seq_len, 4)
+            else:
+                seq = seq[:, ::-1]  # Complement (4, seq_len)
+
+        # Convert to integer encoding (0=A, 1=C, 2=G, 3=T, -1=padding)
         if seq.shape[-1] == 4:
             dna = np.argmax(seq, axis=-1)  # (seq_len,)
         else:
             dna = np.argmax(seq, axis=0)  # (seq_len,)
-        
+
         # Crop/pad to target length
         current_length = len(dna)
         if current_length > self.target_length:
@@ -99,9 +139,9 @@ class SpliceDataset(Dataset):
             crop_start = (current_length - self.target_length) // 2
             dna = dna[crop_start:crop_start + self.target_length]
         elif current_length < self.target_length:
-            # Pad with zeros
+            # Pad with -1s
             padding = self.target_length - current_length
-            dna = np.pad(dna, (0, padding), constant_values=0)
+            dna = np.pad(dna, (0, padding), constant_values=-1)
             crop_start = 0
         else:
             crop_start = 0
@@ -109,18 +149,22 @@ class SpliceDataset(Dataset):
 
         # Extract and adjust splice site positions
         label_seq = self.labels[self.labels['sample_idx'] == idx]
+
+        # Labels on - strand are now indexed from the end of the sequence, so we need to adjust positions
+        #if self.meta_csv.loc[idx, 'strand'] == '-':
+        #    label_seq.loc[:, 'position'] = current_length - 1 - label_seq['position']
         
         # Create dense label array from sparse DataFrame
-        splice_labels_dense = np.zeros(current_length, dtype=np.int64)
+        splice_labels_dense = np.full(current_length, fill_value=4, dtype=np.int64)
         for _, row in label_seq.iterrows():
             pos = int(row['position'])
             label = int(row['label'])
             if 0 <= pos < current_length:
                 splice_labels_dense[pos] = label
         
-        # Find donor (1) and acceptor (2) positions
-        donor_pos = label_seq[label_seq['label'] == 1]['position'].values
-        acceptor_pos = label_seq[label_seq['label'] == 2]['position'].values
+        # Find donor and acceptor positions
+        donor_pos = label_seq[(label_seq['label'] == 0) | (label_seq['label'] == 2)]['position'].values
+        acceptor_pos = label_seq[(label_seq['label'] == 1) | (label_seq['label'] == 3)]['position'].values
         
         # Adjust for cropping
         donor_pos = donor_pos[(donor_pos >= crop_start) & (donor_pos < crop_end)] - crop_start
@@ -151,7 +195,7 @@ class SpliceDataset(Dataset):
         elif current_length < self.target_length:
             # Pad with zeros
             padding = self.target_length - current_length
-            splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=0)
+            splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=4) # Pad with not-a-splice-site label
         else:
             splice_labels_final = splice_labels_dense
         

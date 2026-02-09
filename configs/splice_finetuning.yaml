@@ -5,20 +5,20 @@ gpu_mem_fraction: 0.8
 device: 'cuda'
 
 # Training parameters
-seq_len: 4096  # Must be power of 2 (4096 or 8192)
-batch_size: 64
+seq_len: 10240  # Must be power of 2 (4096 or 8192)
+batch_size: 32
 num_workers: 0  # Set to 0 to avoid JAX fork warnings; increase if not using JAX
 epochs: 20
 lr: 1.0e-4
 validation_fraction: 0.1  # Fraction of training data to use for validation
 
 # Data paths
-data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_smalldd_5kb/mouse_human/train/'
+data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_adult_10kb/mouse_human/train/'
 max_donor_sites: 20
 max_acceptor_sites: 20
 
 # Output directory
-output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/small_mouse_human_5kb/'
+output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/adult_mouse_human_10kb/'
 model_name: 'finetune_splice_heads'  # Name for the saved model file (without .pt extension)
 
 # Pretrained weights

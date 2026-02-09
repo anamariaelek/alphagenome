@@ -292,8 +292,8 @@ def main():
     
     seed = config.get('seed', 1950)
     gpu_mem_fraction = config.get('gpu_mem_fraction', 0.8)
-    device = config.get('device', 'cuda')
-    torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction, device)
+    #device = config.get('device', 'cuda')
+    #torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction, device)
 
     seq_len = config.get('seq_len', 4096)  # Must be power of 2
     batch_size = config.get('batch_size', 4)
@@ -331,13 +331,13 @@ def main():
             'num_tracks_1bp': 0,
             'num_tracks_128bp': 0,
             'num_tracks_contacts': 0,
-            'num_splicing_contexts': 7 ### Hardcoded for now - adjust based on actual data (e.g. number of cell types or conditions with splicing usage data)
+            'num_splicing_contexts': 16 ### Hardcoded for now - adjust based on actual data (e.g. number of cell types or conditions with splicing usage data)
         },
         'mouse': {
             'num_tracks_1bp': 0,
             'num_tracks_128bp': 0,
             'num_tracks_contacts': 0,
-            'num_splicing_contexts': 8 ### Hardcoded for now - adjust based on actual data (e.g. number of cell types or conditions with splicing usage data)
+            'num_splicing_contexts': 34 ### Hardcoded for now - adjust based on actual data (e.g. number of cell types or conditions with splicing usage data)
         }
     }
 
@@ -543,7 +543,7 @@ def main():
 
     loss_fns = {
         'splice_logits' : nn.CrossEntropyLoss(),
-        'splice_usage' : nn.CrossEntropyLoss(),
+        'splice_usage' : nn.BCELoss(),
         'splice_juncs': JunctionsLoss()
     }
 
@@ -568,9 +568,9 @@ def main():
             accelerator=accelerator,
             device=device
         )
-        msg = f"[Epoch {epoch+1}/{epochs}] Train Loss: {avg_train_loss:.4f} "
-        msg += f"(Logits: {splice_logits_loss:.4f} | "
-        msg += f"Usage: {splice_usage_loss:.4f} )"
+        msg = f"Train Loss: {avg_train_loss:.4f} "
+        msg += f"(Splice: {splice_logits_loss:.4f}, "
+        msg += f"Usage: {splice_usage_loss:.4f}) "
     
         # Run validation
         avg_val_loss, val_logits_loss, val_usage_loss, val_juncs_loss = validate_one_epoch(
@@ -582,12 +582,12 @@ def main():
             device=device
         )
         msg += f"Val Loss: {avg_val_loss:.4f} "
-        msg += f"(Splice: {val_logits_loss:.4f} | "
+        msg += f"(Splice: {val_logits_loss:.4f}, "
         msg += f"Usage: {val_usage_loss:.4f})"
  
         # Timing
         epoch_time = time.time() - epoch_start_time
-        msg += f" Time: {epoch_time:.1f}s"
+        msg = f"Epoch {epoch+1}/{epochs} ({epoch_time:.1f}s) - " + msg
         print(msg)
         
         # Save checkpoint only if validation loss improved (after epoch 1)
@@ -596,7 +596,7 @@ def main():
                 best_val_loss = avg_val_loss
                 epochs_without_improvement = 0
                 save_model(model, optimizer, epoch + 1, save_path)
-                print(f"  - Saved best model: {save_path}")
+                print(f"  - Saved best model {best_val_loss:.4f}")
             else:
                 epochs_without_improvement += 1
 
