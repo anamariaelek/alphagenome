@@ -1673,9 +1673,9 @@ class AlphaGenome(Module):
             ('contact_head', ContactMapHead(self.dim_contacts, num_tracks_contacts, self.num_organisms)),
 
             # Splicing
-            ('splice_logits', SpliceSiteClassifier(self.dim_1bp)),
-            ('splice_usage', SpliceSiteUsage(self.dim_1bp, num_splicing_contexts)),
-            ('splice_juncs', SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
+            ('splice_sites_classification', SpliceSiteClassifier(self.dim_1bp)),
+            ('splice_sites_usage', SpliceSiteUsage(self.dim_1bp, num_splicing_contexts)),
+            ('splice_sites_junction', SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
         )
 
         for add_head_args in organism_heads:

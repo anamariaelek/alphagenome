@@ -104,18 +104,18 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
             if org_name not in [get_organism_name(org_idx, species_mapping) for org_idx in batch_organism]:
                 continue
             # Splice logits loss (5-class classification: none, donor, acceptor, etc.)
-            if 'splice_logits' in org_preds:
-                splice_logits = org_preds['splice_logits']  # (batch, seq_len, 5)
+            if 'splice_sites_classification' in org_preds:
+                splice_logits = org_preds['splice_sites_classification']  # (batch, seq_len, 5)
                 # Reshape for cross entropy
                 splice_logits_flat = splice_logits.reshape(-1, splice_logits.shape[-1])
                 splice_labels_flat = splice_labels.reshape(-1)
-                splice_logits_loss = loss_fns['splice_logits'](splice_logits_flat, splice_labels_flat)
+                splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat, splice_labels_flat)
                 losses.append(splice_logits_loss)
                 total_splice_logits_loss += splice_logits_loss.item()
             
             # Splice usage loss (per-context usage prediction)
-            if 'splice_usage' in org_preds:
-                splice_usage = org_preds['splice_usage']  # (batch, seq_len, num_contexts_for_organism)
+            if 'splice_sites_usage' in org_preds:
+                splice_usage = org_preds['splice_sites_usage']  # (batch, seq_len, num_contexts_for_organism)
             
                 # Get which SSE columns this organism uses
                 sse_columns = context_indices_map[0]  # Get first element since all in batch are same organism
@@ -139,7 +139,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                     # Skip if predictions contain NaN
                     if not (torch.isnan(splice_usage_at_sites).any() or torch.isinf(splice_usage_at_sites).any()):
                         # Compute MSE loss
-                        splice_usage_loss = loss_fns['splice_usage'](splice_usage_at_sites, org_sse_target_at_sites)
+                        splice_usage_loss = loss_fns['splice_sites_usage'](splice_usage_at_sites, org_sse_target_at_sites)
                         
                         if not torch.isnan(splice_usage_loss):
                             losses.append(splice_usage_loss)
@@ -147,15 +147,16 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
 
             
             # Splice junction loss (donor-acceptor pairings)
-            if 'splice_juncs' in org_preds:
-                splice_juncs = org_preds['splice_juncs']  # (batch, num_donors, num_acceptors, num_contexts)
+            if 'splice_sites_junctions' in org_preds:
+                splice_juncs = org_preds['splice_sites_junctions']  # (batch, num_donors, num_acceptors, num_contexts)
                 # Create target junction matrix (placeholder - adjust based on your data)
                 # For now, use a simple loss
-                splice_juncs_loss = loss_fns['splice_juncs'](splice_juncs, splice_juncs)  # Placeholder
+                splice_juncs_loss = loss_fns['splice_sites_junctions'](splice_juncs, splice_juncs)  # Placeholder
                 losses.append(splice_juncs_loss * 0)  # Weight down for now
                 total_splice_juncs_loss += splice_juncs_loss.item()
 
         if len(losses) == 0:
+            print("No losses computed for this batch!")
             continue
             
         loss = torch.stack(losses).sum()
@@ -220,17 +221,17 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, accelerator
             if org_name not in [get_organism_name(org_idx, species_mapping) for org_idx in batch_organism]:
                 continue
             # Splice logits loss
-            if 'splice_logits' in org_preds:
-                splice_logits = org_preds['splice_logits']
+            if 'splice_sites_classification' in org_preds:
+                splice_logits = org_preds['splice_sites_classification']
                 splice_logits_flat = splice_logits.reshape(-1, splice_logits.shape[-1])
                 splice_labels_flat = splice_labels.reshape(-1)
-                splice_logits_loss = loss_fns['splice_logits'](splice_logits_flat, splice_labels_flat)
+                splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat, splice_labels_flat)
                 losses.append(splice_logits_loss)
                 total_splice_logits_loss += splice_logits_loss.item()
             
             # Splice usage loss
-            if 'splice_usage' in org_preds:
-                splice_usage = org_preds['splice_usage']  # (batch, seq_len, num_contexts_for_organism)
+            if 'splice_sites_usage' in org_preds:
+                splice_usage = org_preds['splice_sites_usage']  # (batch, seq_len, num_contexts_for_organism)
             
                 # Get which SSE columns this organism uses
                 sse_columns = context_indices_map[0]  # Get first element since all in batch are same organism
@@ -241,7 +242,7 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, accelerator
                 
                 # Only compute loss at splice site positions (labels != 0)
                 splice_site_mask = splice_labels != 0  # (batch, seq_len)
-                
+
                 if splice_site_mask.any():
                     # Select only splice site positions
                     splice_usage_at_sites = splice_usage[splice_site_mask]  # (num_sites, num_contexts)
@@ -254,16 +255,16 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, accelerator
                     # Skip if predictions contain NaN
                     if not (torch.isnan(splice_usage_at_sites).any() or torch.isinf(splice_usage_at_sites).any()):
                         # Compute MSE loss
-                        splice_usage_loss = loss_fns['splice_usage'](splice_usage_at_sites, org_sse_target_at_sites)
+                        splice_usage_loss = loss_fns['splice_sites_usage'](splice_usage_at_sites, org_sse_target_at_sites)
                         
                         if not torch.isnan(splice_usage_loss):
                             losses.append(splice_usage_loss)
                             total_splice_usage_loss += splice_usage_loss.item()
             
             # Splice junction loss
-            if 'splice_juncs' in org_preds:
-                splice_juncs = org_preds['splice_juncs']
-                splice_juncs_loss = loss_fns['splice_juncs'](splice_juncs, splice_juncs)
+            if 'splice_sites_junctions' in org_preds:
+                splice_juncs = org_preds['splice_sites_junctions']
+                splice_juncs_loss = loss_fns['splice_sites_junctions'](splice_juncs, splice_juncs)
                 losses.append(splice_juncs_loss * 0)
                 total_splice_juncs_loss += splice_juncs_loss.item()
 
@@ -291,32 +292,35 @@ def main():
     config = load_config(args.config_file)
     
     seed = config.get('seed', 1950)
-    gpu_mem_fraction = config.get('gpu_mem_fraction', 0.8)
-    #device = config.get('device', 'cuda')
-    #torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction, device)
 
+    data_dir = config.get('data_dir', '/home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_adult_5kb/mouse_human/train/')
+    # data_dir = '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_small_5kb/mouse_human/train/'
+    output_dir = config.get('output_dir', '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/outputs/adult_5kb_mouse_human/')
+    model_name = config.get('model_name', 'alphagenome_splicing')
+    save_path = os.path.join(output_dir, f'{model_name}.pt')
+
+    # Load species mapping from metadata.json
+    metadata_path = os.path.join(data_dir, 'metadata.json')
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+
+    # Config params
+    seed = config.get('seed', 1950)
     seq_len = config.get('seq_len', 4096)  # Must be power of 2
     batch_size = config.get('batch_size', 4)
     num_workers = config.get('num_workers', 4)
     epochs = config.get('epochs', 3)
     lr = config.get('lr', 1e-4)
     validation_fraction = config.get('validation_fraction', 0.1)
-
     max_donor_sites = config.get('max_donor_sites', 20)
     max_acceptor_sites = config.get('max_acceptor_sites', 20)
-
-    # Data paths
-    data_dir = config.get('data_dir', '/home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_small_5kb/mouse_human/train/')
-    output_dir = config.get('output_dir', './outputs_splicing')
-    model_name = config.get('model_name', 'best_model')
-    save_path = os.path.join(output_dir, f'{model_name}.pt')
 
     # Load pretrained weights
     load_pretrained = config.get('load_pretrained', False)
     pretrained_model_version = config.get('pretrained_model_version', 'all_folds')
     freeze_backbone = config.get('freeze_backbone', False)
 
-    # Default config
+    # Load pretrained model configuration
     default_cfg = AlphaGenomeConfig()
     model_cfg = config.get('model', {})
     dims = tuple(model_cfg.get('dims', default_cfg.dims))
@@ -324,23 +328,22 @@ def main():
     dna_embed_width = model_cfg.get('dna_embed_width', default_cfg.dna_embed_width)
     num_organisms = model_cfg.get('num_organisms', default_cfg.num_organisms)
     transformer_kwargs = model_cfg.get('transformer_kwargs', default_cfg.transformer_kwargs)
-    
-    # Hardcoded heads configuration for splicing-only tasks
-    heads_cfg = {
+
+    # Heads configurations
+    heads_cfg = model_cfg.get('heads_cfg', {
         'human': {
             'num_tracks_1bp': 0,
             'num_tracks_128bp': 0,
             'num_tracks_contacts': 0,
-            'num_splicing_contexts': 16 ### Hardcoded for now - adjust based on actual data (e.g. number of cell types or conditions with splicing usage data)
+            'num_splicing_contexts': 16
         },
         'mouse': {
             'num_tracks_1bp': 0,
             'num_tracks_128bp': 0,
             'num_tracks_contacts': 0,
-            'num_splicing_contexts': 34 ### Hardcoded for now - adjust based on actual data (e.g. number of cell types or conditions with splicing usage data)
+            'num_splicing_contexts': 34
         }
-    }
-
+    })
     # Print config for verification
     print("Configuration:")
     print(f"  Seed: {seed}")
@@ -369,49 +372,195 @@ def main():
         for key, value in head_cfg.items():
             print(f"      {key}: {value}")
 
+   
+    # All conditions to predict
+    conds = metadata['usage_conditions']
+    
+    # Alpha Genome conditions
+    alphagenome_conds = {}
+    alphagenome_conds['human'] = {
+        'Brain_1': (219, 586),
+        'Brain_5': (219, 586),
+        'Brain_10': (219, 586),
+        'Brain_11': (219, 586),
+        'Brain_12': (219, 586),
+        'Brain_13': (219, 586),
+        'Brain_14': (219, 586),
+        'Brain_15': (219, 586),
+        'Cerebellum_1': (277, 278, 644, 645),
+        'Cerebellum_5': (277, 278, 644, 645),
+        'Cerebellum_10': (276, 643),
+        'Cerebellum_11': (276, 643),
+        'Cerebellum_12': (276, 643),
+        'Cerebellum_13': (276, 643),
+        'Cerebellum_14': (276, 643),
+        'Cerebellum_15': (276, 643),
+        'Heart_1': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_5': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_10': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_11': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_12': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_13': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_14': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Heart_15': (217, 218, 287, 288, 289, 290, 584, 585, 654, 655, 656, 657),
+        'Kidney_10': (244, 250, 299, 300, 611, 617, 666, 667),
+        'Kidney_11': (244, 250, 299, 300, 611, 617, 666, 667),
+        'Kidney_12': (244, 250, 299, 300, 611, 617, 666, 667),
+        'Kidney_13': (244, 250, 299, 300, 611, 617, 666, 667),
+        'Kidney_14': (244, 250, 299, 300, 611, 617, 666, 667),
+        'Kidney_15': (244, 250, 299, 300, 611, 617, 666, 667),
+        'Liver_10': (230, 231, 232, 597, 598, 599),
+        'Liver_11': (230, 231, 232, 597, 598, 599),
+        'Liver_12': (230, 231, 232, 597, 598, 599),
+        'Liver_13': (230, 231, 232, 597, 598, 599),
+        'Liver_14': (230, 231, 232, 597, 598, 599),
+        'Liver_15': (230, 231, 232, 597, 598, 599),
+        'Ovary_10': (220, 221, 222, 587, 588, 589),
+        'Ovary_11': (220, 221, 222, 587, 588, 589),
+        'Ovary_12': (220, 221, 222, 587, 588, 589),
+        'Ovary_13': (220, 221, 222, 587, 588, 589),
+        'Ovary_14': (220, 221, 222, 587, 588, 589),
+        'Ovary_15': (220, 221, 222, 587, 588, 589),
+        'Testis_10': (209, 210, 211, 576, 577, 578),
+        'Testis_11': (209, 210, 211, 576, 577, 578),
+        'Testis_12': (209, 210, 211, 576, 577, 578),
+        'Testis_13': (209, 210, 211, 576, 577, 578),
+        'Testis_14': (209, 210, 211, 576, 577, 578),
+        'Testis_15': (209, 210, 211, 576, 577, 578),
+    }
+    alphagenome_conds['mouse'] = {
+        'Brain_1': (49, 62, 64, 139, 152, 154),
+        'Brain_5': (49, 62, 64, 139, 152, 154),
+        'Brain_10': (63, 65, 153, 155),
+        'Brain_11': (63, 65, 153, 155),
+        'Brain_12': (63, 65, 153, 155),
+        'Brain_13': (63, 65, 153, 155),
+        'Brain_14': (63, 65, 153, 155),
+        'Brain_15': (63, 65, 153, 155),
+        'Cerebellum_1': (68, 158),
+        'Cerebellum_5': (69, 159),
+        'Cerebellum_10': (69, 159),
+        'Cerebellum_11': (69, 159),
+        'Cerebellum_12': (69, 159),
+        'Cerebellum_13': (69, 159),
+        'Cerebellum_14': (69, 159),
+        'Cerebellum_15': (69, 159),
+        'Heart_1': (47, 48, 137, 138),
+        'Heart_5': (47, 48, 137, 138),
+        'Heart_10': (47, 48, 137, 138),
+        'Heart_11': (47, 48, 137, 138),
+        'Heart_12': (47, 48, 137, 138),
+        'Heart_13': (47, 48, 137, 138),
+        'Heart_14': (47, 48, 137, 138),
+        'Heart_15': (47, 48, 137, 138),
+        'Kidney_10': (77, 167),
+        'Kidney_11': (77, 167),
+        'Kidney_12': (77, 167),
+        'Kidney_13': (77, 167),
+        'Kidney_14': (77, 167),
+        'Kidney_15': (77, 167),
+        'Liver_10': (74, 75, 164, 165),
+        'Liver_11': (74, 75, 164, 165),
+        'Liver_12': (74, 75, 164, 165),
+        'Liver_13': (74, 75, 164, 165),
+        'Liver_14': (74, 75, 164, 165),
+        'Liver_15': (74, 75, 164, 165),
+        'Ovary_10': (50, 140),
+        'Ovary_11': (50, 140),
+        'Ovary_12': (50, 140),
+        'Ovary_13': (50, 140),
+        'Ovary_14': (50, 140),
+        'Ovary_15': (50, 140),
+        'Testis_10': (45, 135),
+        'Testis_11': (45, 135),
+        'Testis_12': (45, 135),
+        'Testis_13': (45, 135),
+        'Testis_14': (45, 135),
+        'Testis_15': (45, 135),
+    }
 
+
+    # Maping
+    species_mapping = metadata.get('species_mapping', {
+        'human': 0,
+        'mouse': 1,
+        'rat': 2
+    })
+    for sps_idx in range(num_organisms):
+        sps_name = [k for k, v in species_mapping.items() if v == sps_idx][0]
+        sps_conds = metadata['species_condition_mapping'][sps_name]
+
+        print(f"Organism {sps_name} (index {sps_idx}) has conditions:")
+        for cond in sps_conds:
+            print(f"  - {cond}: {conds[cond]} --> {alphagenome_conds[sps_name][conds[cond]]}")
     #
     # Architecture
     #
 
     print("\nInitializing model...")
     init_time = time.time()
+    from alphagenome_pytorch import AlphaGenome
 
-    model = AlphaGenome(dims, basepairs, dna_embed_width, num_organisms, transformer_kwargs)
-    
-    # Add splicing heads only (no tracks or contact maps)
-    for organism, head_cfg in heads_cfg.items():
-        model.add_heads(organism=organism, **head_cfg)
-    
-    print("\nTotal model parameters:", model.total_parameters)
-    
     # Load pretrained weights if specified
     if load_pretrained:
         print(f"Loading pretrained weights from {pretrained_model_version}...")
-        model.load_from_official_jax_model(pretrained_model_version, strict=False)
+        model_pretrained = AlphaGenome(dims, basepairs, dna_embed_width, num_organisms, transformer_kwargs)
+        model_pretrained.add_reference_heads("human")
+        model_pretrained.add_reference_heads('mouse')
+        model_pretrained.load_from_official_jax_model(pretrained_model_version, strict=False)
         print("Pretrained weights loaded successfully")
+        print(f"Model initialized in {time.time() - init_time:.2f} seconds.")
+
+    import torch
+
+    # Load model to finetune (same architecture, but we will add new splicing heads)
+    model_finetune = AlphaGenome(dims, basepairs, dna_embed_width, num_organisms, transformer_kwargs)
+
+    for organism, head_cfg in heads_cfg.items():
+        model_finetune.add_heads(organism=organism, **head_cfg)
+
+    # Copy classification weights (names and shapes match)
+    with torch.no_grad():
+        for organism in ['human', 'mouse']:
+            model_finetune.heads[organism]['splice_sites_classification'].linear.weight.copy_(
+                model_pretrained.heads[organism]['splice_sites_classification'].linear.weight
+            )
+            model_finetune.heads[organism]['splice_sites_classification'].linear.bias.copy_(
+                model_pretrained.heads[organism]['splice_sites_classification'].linear.bias
+            )
+
+    with torch.no_grad():
+        for org_idx in range(num_organisms):
+            org_name = [k for k, v in species_mapping.items() if v == org_idx][0]
+            # Get the context names and indices for the fine-tuned head
+            context_indices = list(metadata['species_condition_mapping'][org_name])
+            context_names = [metadata['usage_conditions'][i] for i in list(metadata['species_condition_mapping'][org_name])]
+            for i, cond_name in enumerate(context_names):
+                cond_indices = alphagenome_conds[org_name][cond_name]
+                if isinstance(cond_indices, (tuple, list)):
+                    w = model_pretrained.heads[org_name]['splice_sites_usage'].linear.weight[list(cond_indices)]
+                    b = model_pretrained.heads[org_name]['splice_sites_usage'].linear.bias[list(cond_indices)]
+                    model_finetune.heads[org_name]['splice_sites_usage'].linear.weight[i] = w.mean(dim=0)
+                    model_finetune.heads[org_name]['splice_sites_usage'].linear.bias[i] = b.mean()
+                else:
+                    model_finetune.heads[org_name]['splice_sites_usage'].linear.weight[i] = \
+                        model_pretrained.heads[org_name]['splice_sites_usage'].linear.weight[cond_indices]
+                    model_finetune.heads[org_name]['splice_sites_usage'].linear.bias[i] = \
+                        model_pretrained.heads[org_name]['splice_sites_usage'].linear.bias[cond_indices]
+    # Freeze model backbone
+    if freeze_backbone:
+        print("Freezing transformer backbone...")
+        for param in model_finetune.transformer_unet.parameters():
+            param.requires_grad = False
         
-        # Optionally freeze backbone
-        if freeze_backbone:
-            print("Freezing transformer backbone...")
-            for param in model.transformer_unet.parameters():
-                param.requires_grad = False
-            
-            # Keep heads trainable
-            for organism, heads in model.heads.items():
-                for head in heads.values():
-                    for param in head.parameters():
-                        param.requires_grad = True
-            
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"Trainable parameters (heads only): {trainable_params:,}")
-
-    # Don't need this because it is handled by Accelerator
-    #if torch.cuda.device_count() > 1:
-    #    print(f"Using {torch.cuda.device_count()} GPUs.")
-    #    model = nn.DataParallel(model)
-
-    print(f"Model initialized in {time.time() - init_time:.2f} seconds.")
+        # Keep heads trainable
+        for organism, heads in model_finetune.heads.items():
+            for head in heads.values():
+                for param in head.parameters():
+                    param.requires_grad = True
+        
+        trainable_params = sum(p.numel() for p in model_finetune.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params:,}")
 
     #
     # Train/validation split
@@ -422,16 +571,6 @@ def main():
     print("\nPreparing data loaders...")
     data_time = time.time()
 
-    # Load species mapping from metadata.json
-    metadata_path = os.path.join(data_dir, 'metadata.json')
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-    
-    species_mapping = metadata.get('species_mapping', {
-        'human': 0,
-        'mouse': 1,
-        'rat': 2
-    })
     
     print(f"Species mapping: {species_mapping}")
 
@@ -524,7 +663,7 @@ def main():
     print("\nSetting up training...")
 
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
+        filter(lambda p: p.requires_grad, model_finetune.parameters()),
         lr=lr,
         weight_decay=0.01
     )
@@ -532,19 +671,15 @@ def main():
     # prepare accelerator for distributed
 
     accelerate_kwargs = {}
-
     accelerator = Accelerator(**accelerate_kwargs)
-
-    model, train_loader, val_loader, optimizer = accelerator.prepare(model, train_loader, val_loader, optimizer)
-
+    model_finetune, train_loader, val_loader, optimizer = accelerator.prepare(model_finetune, train_loader, val_loader, optimizer)
     device = accelerator.device
 
     # Losses for splicing tasks only
-
     loss_fns = {
-        'splice_logits' : nn.CrossEntropyLoss(),
-        'splice_usage' : nn.BCELoss(),
-        'splice_juncs': JunctionsLoss()
+        'splice_sites_classification': nn.CrossEntropyLoss(),
+        'splice_sites_usage': nn.BCELoss(),
+        'splice_sites_junctions': JunctionsLoss()
     }
 
     print(f"\nStarting training for {epochs} epochs...")
@@ -560,7 +695,7 @@ def main():
         
         # Run training
         avg_train_loss, splice_logits_loss, splice_usage_loss, splice_juncs_loss = train_one_epoch(
-            model=model,
+            model=model_finetune,
             dataloader=train_loader,
             optimizer=optimizer,
             loss_fns=loss_fns,
@@ -574,7 +709,7 @@ def main():
     
         # Run validation
         avg_val_loss, val_logits_loss, val_usage_loss, val_juncs_loss = validate_one_epoch(
-            model=model,
+            model=model_finetune,
             val_loader=val_loader,
             loss_fns=loss_fns,
             species_mapping=species_mapping,
@@ -595,7 +730,7 @@ def main():
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 epochs_without_improvement = 0
-                save_model(model, optimizer, epoch + 1, save_path)
+                save_model(model_finetune, optimizer, epoch + 1, save_path)
                 print(f"  - Saved best model {best_val_loss:.4f}")
             else:
                 epochs_without_improvement += 1

@@ -103,7 +103,6 @@ class SpliceDataset(Dataset):
         self.sse.loc[self.sse['label'] == 0, 'position'] += -2 
         self.sse.loc[self.sse['label'] == 3, 'position'] += -2 
 
-
         # Load conditions for species 
         meta_path = os.path.join(self.data_dir, 'metadata.json')
         with open(meta_path, 'r') as f:

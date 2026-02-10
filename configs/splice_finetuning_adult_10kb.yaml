@@ -5,7 +5,7 @@ gpu_mem_fraction: 0.8
 device: 'cuda'
 
 # Training parameters
-seq_len: 10240  # Must be power of 2 (4096 or 8192)
+seq_len: 10240  # Must be power of 2 (e.g. 4096, 8192, 10240)
 batch_size: 32
 num_workers: 0  # Set to 0 to avoid JAX fork warnings; increase if not using JAX
 epochs: 20
@@ -13,9 +13,9 @@ lr: 1.0e-4
 validation_fraction: 0.1  # Fraction of training data to use for validation
 
 # Data paths
-data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_adult_10kb/mouse_human/train/'
-max_donor_sites: 20
-max_acceptor_sites: 20
+data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_adult_10kb/mouse_human/train/'
+max_donor_sites: 50
+max_acceptor_sites: 50
 
 # Output directory
 output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/adult_mouse_human_10kb/'
@@ -32,4 +32,14 @@ model:
   # dims: [768, 896, 1024, 1152, 1280, 1408, 1536]  # uncomment to customize
   # basepairs: 4
   # dna_embed_width: 15
-
+  heads_cfg:
+    human:
+      num_tracks_1bp: 0
+      num_tracks_128bp: 0
+      num_tracks_contacts: 0
+      num_splicing_contexts: 16 ### Hardcoded (adult 16, small 7)
+    mouse:
+      num_tracks_1bp: 0
+      num_tracks_128bp: 0
+      num_tracks_contacts: 0
+      num_splicing_contexts: 34 ### Hardcoded (adult 34, small 8)
