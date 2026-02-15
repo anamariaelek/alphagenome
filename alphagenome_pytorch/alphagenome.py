@@ -1318,7 +1318,7 @@ class SpliceSiteUsage(Module):
         self,
         embeds_1bp
     ):
-        return self.linear(embeds_1bp).sigmoid()
+        return self.linear(embeds_1bp)  # Return logits, not sigmoid
 
 class SpliceJunctionHead(Module):
     def __init__(
@@ -2344,3 +2344,5 @@ class AlphaGenome(Module):
             mask_metadata=mask_metadata,
             settings=settings,
         )
+
+

@@ -1,30 +1,33 @@
 # Configuration for fine-tuning AlphaGenome on splice site data
 
 seed: 1950
-gpu_mem_fraction: 0.8
 device: 'cuda'
+gpu_mem_fraction: 0.5
+num_threads: 1  # Number of CPU threads for data loading and processing
+num_interop_threads: 1  # Number of threads for PyTorch inter-op parallelism
+num_workers: 12
 
 # Training parameters
 seq_len: 10240  # Must be power of 2 (e.g. 4096, 8192, 10240)
-batch_size: 32
-num_workers: 0  # Set to 0 to avoid JAX fork warnings; increase if not using JAX
-epochs: 20
+batch_size: 64
+epochs: 50
 lr: 1.0e-4
-validation_fraction: 0.1  # Fraction of training data to use for validation
+validation_fraction: 0.2  # Fraction of training data to use for validation
 
 # Data paths
-data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_adult_10kb/mouse_human/train/'
-max_donor_sites: 50
-max_acceptor_sites: 50
+data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_small_10kb/mouse_human/train/'
+max_donor_sites: 20
+max_acceptor_sites: 20
 
 # Output directory
-output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/adult_mouse_human_10kb/'
+output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/small_mouse_human_10kb/'
 model_name: 'finetune_splice_heads'  # Name for the saved model file (without .pt extension)
 
 # Pretrained weights
 load_pretrained: true
 pretrained_model_version: 'all_folds'
 freeze_backbone: true  # Set to true to only train heads
+heads_to_train: ['splice_sites_classification', 'splice_sites_usage']  # Specify which heads to train e.g. 'splice_sites_classification', 'splice_sites_usage'
 
 # Model architecture (use defaults or customize)
 model:
@@ -37,9 +40,9 @@ model:
       num_tracks_1bp: 0
       num_tracks_128bp: 0
       num_tracks_contacts: 0
-      num_splicing_contexts: 16 ### Hardcoded (adult 16, small 7)
+      num_splicing_contexts: 7 ### Hardcoded (adult 16, small 7)
     mouse:
       num_tracks_1bp: 0
       num_tracks_128bp: 0
       num_tracks_contacts: 0
-      num_splicing_contexts: 34 ### Hardcoded (adult 34, small 8)
+      num_splicing_contexts: 8 ### Hardcoded (adult 34, small 8)

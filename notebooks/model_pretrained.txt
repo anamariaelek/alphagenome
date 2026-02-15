@@ -1,0 +1,939 @@
+AlphaGenome(
+  (transformer_unet): TransformerUnet(
+    (dna_embed): DNAEmbed(
+      (conv): Conv1d(4, 768, kernel_size=(15,), stride=(1,), padding=(7,))
+      (pointwise): ConvBlock(
+        (net): Sequential(
+          (0): BatchRMSNorm()
+          (1): GELU1702()
+          (2): WeightStandardConv(768, 768, kernel_size=(5,), stride=(1,), padding=(2,))
+        )
+      )
+      (pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+    )
+    (downs): ModuleList(
+      (0): DownresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(768, 896, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(896, 896, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (max_pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+      )
+      (1): DownresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(896, 1024, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1024, 1024, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (max_pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+      )
+      (2): DownresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1024, 1152, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1152, 1152, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (max_pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+      )
+      (3): DownresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1152, 1280, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1280, 1280, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (max_pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+      )
+      (4): DownresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1280, 1408, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1408, 1408, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (max_pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+      )
+      (5): DownresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1408, 1536, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1536, 1536, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (max_pool): Reduce('b d (n pool) -> b d n', 'max', pool=2)
+      )
+    )
+    (ups): ModuleList(
+      (0): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1536, 1536, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(1536, 1536, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1536, 1536, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+      (1): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1536, 1408, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(1408, 1408, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1408, 1408, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+      (2): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1408, 1280, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(1280, 1280, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1280, 1280, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+      (3): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1280, 1152, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(1152, 1152, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1152, 1152, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+      (4): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1152, 1024, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(1024, 1024, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1024, 1024, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+      (5): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(1024, 896, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(896, 896, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(896, 896, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+      (6): UpresBlock(
+        (conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(896, 768, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+        (unet_conv): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): Conv1d(768, 768, kernel_size=(1,), stride=(1,))
+          )
+        )
+        (conv_out): ConvBlock(
+          (net): Sequential(
+            (0): BatchRMSNorm()
+            (1): GELU1702()
+            (2): WeightStandardConv(768, 768, kernel_size=(5,), stride=(1,), padding=(2,))
+          )
+        )
+      )
+    )
+    (transformer): TransformerTower(
+      (rel_pos_features): RelativePosFeatures()
+      (rotary_emb): RotaryEmbedding()
+      (layers): ModuleList(
+        (0): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2): SingleToPairwise(
+            (avg_pool): Reduce('b (n pool) d -> b n d', 'mean', pool=16)
+            (norm): RMSNormWithBias()
+            (split_heads): Rearrange('... (h d) -> ... h d', h=32)
+            (to_outer_sum): Sequential(
+              (0): GELU(approximate='none')
+              (1): Linear(in_features=1536, out_features=256, bias=False)
+            )
+            (to_qk): Linear(in_features=1536, out_features=8192, bias=False)
+            (qk_to_pairwise): Linear(in_features=32, out_features=128, bias=True)
+            (to_rel_pos_encoding): Linear(in_features=64, out_features=4096, bias=True)
+          )
+          (3): NormWrapper(
+            (block): PairwiseRowAttention(
+              (to_qk): Linear(in_features=128, out_features=256, bias=False)
+              (to_v): Linear(in_features=128, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+          (4): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=128, out_features=256, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=256, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+        )
+        (1): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2-4): 3 x None
+        )
+        (2): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2): SingleToPairwise(
+            (avg_pool): Reduce('b (n pool) d -> b n d', 'mean', pool=16)
+            (norm): RMSNormWithBias()
+            (split_heads): Rearrange('... (h d) -> ... h d', h=32)
+            (to_outer_sum): Sequential(
+              (0): GELU(approximate='none')
+              (1): Linear(in_features=1536, out_features=256, bias=False)
+            )
+            (to_qk): Linear(in_features=1536, out_features=8192, bias=False)
+            (qk_to_pairwise): Linear(in_features=32, out_features=128, bias=True)
+            (to_rel_pos_encoding): Linear(in_features=64, out_features=4096, bias=True)
+          )
+          (3): NormWrapper(
+            (block): PairwiseRowAttention(
+              (to_qk): Linear(in_features=128, out_features=256, bias=False)
+              (to_v): Linear(in_features=128, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+          (4): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=128, out_features=256, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=256, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+        )
+        (3): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2-4): 3 x None
+        )
+        (4): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2): SingleToPairwise(
+            (avg_pool): Reduce('b (n pool) d -> b n d', 'mean', pool=16)
+            (norm): RMSNormWithBias()
+            (split_heads): Rearrange('... (h d) -> ... h d', h=32)
+            (to_outer_sum): Sequential(
+              (0): GELU(approximate='none')
+              (1): Linear(in_features=1536, out_features=256, bias=False)
+            )
+            (to_qk): Linear(in_features=1536, out_features=8192, bias=False)
+            (qk_to_pairwise): Linear(in_features=32, out_features=128, bias=True)
+            (to_rel_pos_encoding): Linear(in_features=64, out_features=4096, bias=True)
+          )
+          (3): NormWrapper(
+            (block): PairwiseRowAttention(
+              (to_qk): Linear(in_features=128, out_features=256, bias=False)
+              (to_v): Linear(in_features=128, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+          (4): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=128, out_features=256, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=256, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+        )
+        (5): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2-4): 3 x None
+        )
+        (6): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2): SingleToPairwise(
+            (avg_pool): Reduce('b (n pool) d -> b n d', 'mean', pool=16)
+            (norm): RMSNormWithBias()
+            (split_heads): Rearrange('... (h d) -> ... h d', h=32)
+            (to_outer_sum): Sequential(
+              (0): GELU(approximate='none')
+              (1): Linear(in_features=1536, out_features=256, bias=False)
+            )
+            (to_qk): Linear(in_features=1536, out_features=8192, bias=False)
+            (qk_to_pairwise): Linear(in_features=32, out_features=128, bias=True)
+            (to_rel_pos_encoding): Linear(in_features=64, out_features=4096, bias=True)
+          )
+          (3): NormWrapper(
+            (block): PairwiseRowAttention(
+              (to_qk): Linear(in_features=128, out_features=256, bias=False)
+              (to_v): Linear(in_features=128, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+          (4): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=128, out_features=256, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=256, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+        )
+        (7): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2-4): 3 x None
+        )
+        (8): ModuleList(
+          (0): NormWrapper(
+            (block): Attention(
+              (split_q_heads): Rearrange('b n (g h d) -> b g h n d', h=1, g=8)
+              (split_kv_heads): Rearrange('b n (h d) -> b h n d', h=1)
+              (merge_heads): Rearrange('b g h n d -> b n (g h d)')
+              (to_qkv): Linear(in_features=1536, out_features=1344, bias=False)
+              (to_out): Linear(in_features=1536, out_features=1536, bias=True)
+              (q_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (k_norm): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+              (v_norm): LayerNorm((192,), eps=1e-05, elementwise_affine=True)
+              (to_attn_bias): Sequential(
+                (0): BatchRMSNorm()
+                (1): GELU(approximate='none')
+                (2): Linear(in_features=128, out_features=8, bias=False)
+                (3): Rearrange('b i j (g h) -> b g h i j', g=8)
+              )
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (1): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=1536, out_features=3072, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=3072, out_features=1536, bias=True)
+            )
+            (pre_rmsnorm): BatchRMSNorm()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): BatchRMSNorm()
+          )
+          (2): SingleToPairwise(
+            (avg_pool): Reduce('b (n pool) d -> b n d', 'mean', pool=16)
+            (norm): RMSNormWithBias()
+            (split_heads): Rearrange('... (h d) -> ... h d', h=32)
+            (to_outer_sum): Sequential(
+              (0): GELU(approximate='none')
+              (1): Linear(in_features=1536, out_features=256, bias=False)
+            )
+            (to_qk): Linear(in_features=1536, out_features=8192, bias=False)
+            (qk_to_pairwise): Linear(in_features=32, out_features=128, bias=True)
+            (to_rel_pos_encoding): Linear(in_features=64, out_features=4096, bias=True)
+          )
+          (3): NormWrapper(
+            (block): PairwiseRowAttention(
+              (to_qk): Linear(in_features=128, out_features=256, bias=False)
+              (to_v): Linear(in_features=128, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+          (4): NormWrapper(
+            (block): Sequential(
+              (0): Linear(in_features=128, out_features=256, bias=True)
+              (1): ReLU()
+              (2): Dropout(p=0.0, inplace=False)
+              (3): Linear(in_features=256, out_features=128, bias=True)
+            )
+            (pre_rmsnorm): RMSNormWithBias()
+            (post_block_dropout): Dropout(p=0.1, inplace=False)
+            (post_rmsnorm): Identity()
+          )
+        )
+      )
+    )
+  )
+  (organism_embed): OrganismEmbedding(
+    (embed): Embedding(2, 1536)
+  )
+  ( ): OutputEmbedding(
+    (double_features): Linear(in_features=1536, out_features=3072, bias=True)
+    (norm): BatchRMSNorm()
+    (embed): Embedding(2, 3072)
+    (activation): GELU1702()
+  )
+  (outembed_1bp): OutputEmbedding(
+    (double_features): Linear(in_features=768, out_features=1536, bias=True)
+    (skip_proj): Linear(in_features=3072, out_features=1536, bias=False)
+    (norm): BatchRMSNorm()
+    (embed): Embedding(2, 1536)
+    (activation): GELU1702()
+  )
+  (outembed_pair): OutputPairEmbedding(
+    (norm): RMSNormWithBias()
+    (embed): Embedding(2, 128)
+    (activation): GELU1702()
+  )
+  (heads): ModuleDict(
+    (human): ModuleDict(
+      (rna_seq): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=768, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=768, bias=True)
+          )
+        )
+      )
+      (cage): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=640, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=640, bias=True)
+          )
+        )
+      )
+      (dnase): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=384, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=384, bias=True)
+          )
+        )
+      )
+      (procap): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=128, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=128, bias=True)
+          )
+        )
+      )
+      (atac): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=256, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=256, bias=True)
+          )
+        )
+      )
+      (chip_tf): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=1664, bias=True)
+          )
+        )
+      )
+      (chip_histone): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=1152, bias=True)
+          )
+        )
+      )
+      (contact_maps): ContactMapsHead(
+        (to_pred): Linear(in_features=128, out_features=28, bias=True)
+      )
+      (splice_sites_classification): SpliceSiteClassifier(
+        (linear): Linear(in_features=1536, out_features=5, bias=True)
+      )
+      (splice_sites_usage): SpliceSiteUsage(
+        (linear): Linear(in_features=1536, out_features=734, bias=True)
+      )
+      (splice_sites_junction): SpliceSitesJunctionHead(
+        (project): Linear(in_features=1536, out_features=768, bias=True)
+        (rope): RotaryEmbedding()
+      )
+    )
+    (mouse): ModuleDict(
+      (rna_seq): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=768, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=768, bias=True)
+          )
+        )
+      )
+      (cage): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=640, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=640, bias=True)
+          )
+        )
+      )
+      (dnase): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=384, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=384, bias=True)
+          )
+        )
+      )
+      (procap): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=128, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=128, bias=True)
+          )
+        )
+      )
+      (atac): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_1): TracksScaledPrediction(
+            (to_pred): Linear(in_features=1536, out_features=256, bias=True)
+          )
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=256, bias=True)
+          )
+        )
+      )
+      (chip_tf): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=1664, bias=True)
+          )
+        )
+      )
+      (chip_histone): GenomeTracksHead(
+        (resolutions): ModuleDict(
+          (resolution_128): TracksScaledPrediction(
+            (to_pred): Linear(in_features=3072, out_features=1152, bias=True)
+          )
+        )
+      )
+      (contact_maps): ContactMapsHead(
+        (to_pred): Linear(in_features=128, out_features=28, bias=True)
+      )
+      (splice_sites_classification): SpliceSiteClassifier(
+        (linear): Linear(in_features=1536, out_features=5, bias=True)
+      )
+      (splice_sites_usage): SpliceSiteUsage(
+        (linear): Linear(in_features=1536, out_features=734, bias=True)
+      )
+      (splice_sites_junction): SpliceSitesJunctionHead(
+        (project): Linear(in_features=1536, out_features=768, bias=True)
+        (rope): RotaryEmbedding()
+      )
+    )
+  )
+)

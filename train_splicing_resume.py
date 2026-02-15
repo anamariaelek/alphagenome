@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 from statistics import mode
 import yaml
 import json
@@ -9,6 +10,8 @@ import random
 import time
 import numpy as np
 import warnings
+
+from tests.test_selective_inference import model
 
 # Suppress warnings
 warnings.filterwarnings('ignore', message='Initializing zero-element tensors')
@@ -32,6 +35,8 @@ def exists(v):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_file", type=str)
+    parser.add_argument("--resume", type=str, default=None, 
+                       help="Path to checkpoint to resume training from")
     args = parser.parse_args()
     return args
     
@@ -59,6 +64,25 @@ def save_model(model, optimizer, epoch, path):
         'epoch': epoch
     }, path)
 
+def load_checkpoint(model, optimizer, checkpoint_path, device='cuda'):
+    """Load checkpoint and return the starting epoch."""
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Handle DataParallel models
+    if isinstance(model, nn.DataParallel):
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    
+    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
+    start_epoch = checkpoint.get('epoch', 0)
+    print(f"  Resumed from epoch {start_epoch}")
+    
+    return start_epoch
+
 def get_organism_name(organism_idx, species_mapping):
     """Map organism index to organism name used in model heads"""
     # Invert species_mapping to go from index to name
@@ -66,7 +90,6 @@ def get_organism_name(organism_idx, species_mapping):
         if idx == organism_idx:
             return name
     return f'organism_{organism_idx}'
-
 
 def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None):
 
@@ -335,6 +358,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction, device=0)
 
+    cache_dir = './outputs/checkpoints/pretrained/'
     seed = config.get('seed', 1950)
     set_seed(seed)
 
@@ -538,12 +562,46 @@ def main():
     model_pretrained.add_reference_heads("human")
     model_pretrained.add_reference_heads('mouse')
 
-    # Load pretrained weights if specified
-    if load_pretrained:
-        print(f"Loading pretrained weights from {pretrained_model_version}...")
-        model_pretrained.load_from_official_jax_model(pretrained_model_version, strict=False)
+    # Check if resuming from checkpoint
+    resume_from_checkpoint = args.resume is not None
+    start_epoch = 0
+
+    if resume_from_checkpoint:
+        # When resuming, load the complete model state from checkpoint
+        print("Resuming training from checkpoint...")
         
-        # Save classification head weights BEFORE clearing heads (use .clone() to copy data)
+        # Move model to device before loading checkpoint
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model_pretrained = model_pretrained.to(device)
+        
+        # Create temporary optimizer for loading checkpoint state
+        temp_optimizer = torch.optim.AdamW(model_pretrained.parameters(), lr=lr, weight_decay=0.01)
+        
+        # Load checkpoint
+        start_epoch = load_checkpoint(model_pretrained, temp_optimizer, args.resume, device=device)
+        
+        # Store checkpoint optimizer state to apply later
+        checkpoint_optimizer_state = temp_optimizer.state_dict()
+        del temp_optimizer
+        
+    elif load_pretrained:
+        # Load pretrained weights
+        print(f"Loading pretrained weights from {pretrained_model_version}...")
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(exist_ok=True, parents=True)
+        cached_model_path = cache_dir / 'pretrained_model.pt'
+        if cached_model_path.exists():
+            print(f"Loading pretrained model from cache: {cached_model_path}")
+            checkpoint = torch.load(cached_model_path, map_location='cpu')
+            model_pretrained.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            print("No cached model found. Downloading pretrained weights...")
+            model_pretrained.load_from_official_jax_model(pretrained_model_version, strict=False)
+            print("Saving to cache for future use...")
+            torch.save({'model_state_dict': model_pretrained.state_dict()}, cached_model_path)
+            print(f"Model cached to {cached_model_path}")
+        
+        # Save classification head weights BEFORE clearing heads
         weights_and_biases = dict()
         for organism in ['human', 'mouse']:
             weights_and_biases[organism] = dict()
@@ -557,24 +615,38 @@ def main():
             print(f"  {organism} splice classification head bias mean: {b.mean().item():.6f}, std: {b.std().item():.6f}")
         print("Pretrained weights loaded successfully")
         print(f"Model initialized in {time.time() - init_time:.2f} seconds.")
-    
-    # Remove existing heads and add new splicing heads
-    model_pretrained.heads = torch.nn.ModuleDict()
-    for organism, head_cfg in heads_cfg.items():
-        model_pretrained.add_heads(organism=organism, **head_cfg)
+        
+        # Remove existing heads and add new splicing heads
+        model_pretrained.heads = torch.nn.ModuleDict()
+        for organism, head_cfg in heads_cfg.items():
+            model_pretrained.add_heads(organism=organism, **head_cfg)
 
-    # Copy output head weights from pretrained model
-    if load_pretrained:
+        # Copy output head weights from pretrained model
         print("Copying pretrained weights after adding new heads...")
         for org_name in ['human', 'mouse']:
             model_pretrained.heads[org_name]['splice_sites_classification'].linear.weight.data.copy_(weights_and_biases[org_name]['classification_head']['weight'])
             model_pretrained.heads[org_name]['splice_sites_classification'].linear.bias.data.copy_(weights_and_biases[org_name]['classification_head']['bias'])
 
-    ## Add compilation here (before moving to device)
-    #print("Compiling model with torch.compile()...")
-    #model_pretrained = torch.compile(model_pretrained, mode="reduce-overhead")
+        # Move model to device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model_pretrained = model_pretrained.to(device)
+        
+    else:
+        # No pretrained weights and not resuming - train from scratch
+        print("\nTraining from scratch (no pretrained weights)")
+        
+        # Remove existing heads and add new splicing heads
+        model_pretrained.heads = torch.nn.ModuleDict()
+        for organism, head_cfg in heads_cfg.items():
+            model_pretrained.add_heads(organism=organism, **head_cfg)
+        
+        # Move model to device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model_pretrained = model_pretrained.to(device)
 
-    # Freeze model backbone
+    print(f"Using device: {device}")
+
+    # Freeze model backbone (applies to all initialization paths if configured)
     if freeze_backbone:
         print("Freezing transformer backbone...")
         for param in model_pretrained.transformer_unet.parameters():
@@ -620,10 +692,10 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     print("\nPreparing data loaders...")
     data_time = time.time()
-
     
     print(f"Species mapping: {species_mapping}")
 
+    print("Loading dataset...")
     # Load splice dataset
     train_dataset = SpliceDataset(
         data_dir=data_dir,
@@ -634,6 +706,7 @@ def main():
     )
 
     # Split into train and validation (stratified by species)
+    print("Splitting dataset into train and validation sets...")
     dataset_size = len(train_dataset)
     val_size = int(dataset_size * validation_fraction)
     train_size = dataset_size - val_size
@@ -712,25 +785,30 @@ def main():
     train_time = time.time()
     print("\nSetting up training...")
 
+    # Initialize optimizer after freezing (only tracks trainable parameters)
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model_pretrained.parameters()),
         lr=lr,
         weight_decay=0.01
     )
-
-    # Move model to device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model_pretrained = model_pretrained.to(device)
-    print(f"Using device: {device}")
+    
+    # If resuming, load the optimizer state from checkpoint
+    if resume_from_checkpoint:
+        optimizer.load_state_dict(checkpoint_optimizer_state)
+        print("Loaded optimizer state from checkpoint")
 
     # Losses for splicing tasks only
     loss_fns = {
         'splice_sites_classification': nn.CrossEntropyLoss(),
-        'splice_sites_usage': nn.BCEWithLogitsLoss(),  # More numerically stable
+        'splice_sites_usage': nn.BCEWithLogitsLoss(),
         'splice_sites_junctions': JunctionsLoss()
     }
 
-    print(f"\nStarting training for {epochs} epochs...")
+    if resume_from_checkpoint:
+        print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
+    else:
+        print(f"\nStarting training for {epochs} epochs...")
+    
     print(f"Train size: {train_size}, Validation size: {val_size}")
     print(f"Train batches per epoch: {len(train_loader)}")
     print(f"Validation batches per epoch: {len(val_loader)}")
@@ -738,7 +816,7 @@ def main():
     patience = 5
     epochs_without_improvement = 0
     
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         epoch_start_time = time.time()
         
         # Run training
@@ -785,7 +863,7 @@ def main():
                 print(f"\nEarly stopping triggered after {epoch + 1} epochs (no improvement for {patience} epochs)")
                 break
         
-    print(f"\nTraining complete! Best validation loss ({best_val_loss:.4f}) achieved at epoch {epoch + 1 - epochs_without_improvement}.")
+    print(f"\nTraining complete! Best validation loss ({best_val_loss:.4f}) achieved.")
     print(f"Total training time: {(time.time() - train_time) / 60:.2f} minutes.")
     print(f"Total script runtime: {(time.time() - start_time) / 60:.2f} minutes.")
     
