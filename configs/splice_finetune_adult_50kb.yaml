@@ -2,22 +2,22 @@
 
 seed: 1950
 device: 'cuda'
-gpu_mem_fraction: 0.5
+gpu_mem_fraction: 0.4
 num_threads: 1  # Number of CPU threads for data loading and processing
 num_interop_threads: 1  # Number of threads for PyTorch inter-op parallelism
 num_workers: 12
 
 # Training parameters
 seq_len: 49152  # Must be multiplier of 2046 (e.g. 4096, 10240, ... , 49152)
-batch_size: 8
+batch_size: 16
 epochs: 50
-lr: 1.0e-3
+lr: 1.0e-4
 validation_fraction: 0.2  # Fraction of training data to use for validation
 
 # Data paths
 data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_adult_50kb/mouse_human/train/'
-max_donor_sites: 20
-max_acceptor_sites: 20
+max_donor_sites: 50
+max_acceptor_sites: 50
 
 # Output directory
 output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/adult_mouse_human_50kb/'

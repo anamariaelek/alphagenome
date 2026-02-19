@@ -37,6 +37,8 @@ def parse_args():
     parser.add_argument("--config_file", type=str)
     parser.add_argument("--resume", type=str, default=None, 
                        help="Path to checkpoint to resume training from")
+    parser.add_argument("--ddp", action="store_true", help="Enable DistributedDataParallel (DDP) training")
+    parser.add_argument("--local_rank", type=int, default=0, help="Local rank for DDP")
     args = parser.parse_args()
     return args
     
@@ -342,6 +344,19 @@ def main():
 
     args = parse_args()
     config = load_config(args.config_file)
+
+    # DDP setup
+    use_ddp = args.ddp
+    if use_ddp:
+        import torch.distributed as dist
+        dist.init_process_group(backend="nccl")
+        local_rank = args.local_rank
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        is_main_process = (dist.get_rank() == 0)
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        is_main_process = True
     
     data_dir = config.get('data_dir', '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_adult_10kb/mouse_human/train/')
     output_dir = config.get('output_dir', '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/outputs/adult_10kb_mouse_human/')
@@ -569,27 +584,20 @@ def main():
     if resume_from_checkpoint:
         # When resuming, load the complete model state from checkpoint
         print("Resuming training from checkpoint...")
-        
-        # Move model to device before loading checkpoint
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model_pretrained = model_pretrained.to(device)
-        
         # Create temporary optimizer for loading checkpoint state
         temp_optimizer = torch.optim.AdamW(model_pretrained.parameters(), lr=lr, weight_decay=0.01)
-        
         # Load checkpoint
         start_epoch = load_checkpoint(model_pretrained, temp_optimizer, args.resume, device=device)
-        
         # Store checkpoint optimizer state to apply later
         checkpoint_optimizer_state = temp_optimizer.state_dict()
         del temp_optimizer
-        
     elif load_pretrained:
         # Load pretrained weights
         print(f"Loading pretrained weights from {pretrained_model_version}...")
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(exist_ok=True, parents=True)
-        cached_model_path = cache_dir / 'pretrained_model.pt'
+        cached_model_path = cache_dir / f'pretrained_model_{pretrained_model_version}.pt'
         if cached_model_path.exists():
             print(f"Loading pretrained model from cache: {cached_model_path}")
             checkpoint = torch.load(cached_model_path, map_location='cpu')
@@ -628,23 +636,22 @@ def main():
             model_pretrained.heads[org_name]['splice_sites_classification'].linear.bias.data.copy_(weights_and_biases[org_name]['classification_head']['bias'])
 
         # Move model to device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model_pretrained = model_pretrained.to(device)
-        
     else:
         # No pretrained weights and not resuming - train from scratch
         print("\nTraining from scratch (no pretrained weights)")
-        
         # Remove existing heads and add new splicing heads
         model_pretrained.heads = torch.nn.ModuleDict()
         for organism, head_cfg in heads_cfg.items():
             model_pretrained.add_heads(organism=organism, **head_cfg)
-        
-        # Move model to device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model_pretrained = model_pretrained.to(device)
 
-    print(f"Using device: {device}")
+    # DDP: wrap model
+    if use_ddp:
+        model_pretrained = torch.nn.parallel.DistributedDataParallel(model_pretrained, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+
+    if is_main_process:
+        print(f"Using device: {device}")
 
     # Freeze model backbone (applies to all initialization paths if configured)
     if freeze_backbone:
@@ -759,24 +766,43 @@ def main():
         val_count = np.sum(val_species == organism_idx)
         print(f"  {organism_name}: {train_count} train, {val_count} val")
     
-    train_sampler = SpeciesGroupedSampler(train_subset, batch_size=batch_size, shuffle=True)
-    val_sampler = SpeciesGroupedSampler(val_subset, batch_size=batch_size, shuffle=False)
-    
-    train_loader = DataLoader(
-        train_subset,
-        batch_sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-    
-    val_loader = DataLoader(
-        val_subset,
-        batch_sampler=val_sampler,
-        num_workers=num_workers,
-        pin_memory=True
-    )
+    # DDP: Use DistributedSampler
+    if use_ddp:
+        from torch.utils.data.distributed import DistributedSampler
+        train_sampler = DistributedSampler(train_subset, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=True, drop_last=False)
+        val_sampler = DistributedSampler(val_subset, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=False, drop_last=False)
+        train_loader = DataLoader(
+            train_subset,
+            sampler=train_sampler,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        val_loader = DataLoader(
+            val_subset,
+            sampler=val_sampler,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+    else:
+        train_sampler = SpeciesGroupedSampler(train_subset, batch_size=batch_size, shuffle=True)
+        val_sampler = SpeciesGroupedSampler(val_subset, batch_size=batch_size, shuffle=False)
+        train_loader = DataLoader(
+            train_subset,
+            batch_sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        val_loader = DataLoader(
+            val_subset,
+            batch_sampler=val_sampler,
+            num_workers=num_workers,
+            pin_memory=True
+        )
 
-    print(f"Data loaders prepared in {time.time() - data_time:.2f} seconds.")
+    if is_main_process:
+        print(f"Data loaders prepared in {time.time() - data_time:.2f} seconds.")
 
     #
     # Training loop
@@ -795,7 +821,8 @@ def main():
     # If resuming, load the optimizer state from checkpoint
     if resume_from_checkpoint:
         optimizer.load_state_dict(checkpoint_optimizer_state)
-        print("Loaded optimizer state from checkpoint")
+        if is_main_process:
+            print("Loaded optimizer state from checkpoint")
 
     # Losses for splicing tasks only
     loss_fns = {
@@ -805,20 +832,24 @@ def main():
     }
 
     if resume_from_checkpoint:
-        print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
+        if is_main_process:
+            print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
     else:
-        print(f"\nStarting training for {epochs} epochs...")
-    
-    print(f"Train size: {train_size}, Validation size: {val_size}")
-    print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Validation batches per epoch: {len(val_loader)}")
+        if is_main_process:
+            print(f"\nStarting training for {epochs} epochs...")
+    if is_main_process:
+        print(f"Train size: {train_size}, Validation size: {val_size}")
+        print(f"Train batches per epoch: {len(train_loader)}")
+        print(f"Validation batches per epoch: {len(val_loader)}")
     best_val_loss = float('inf')
     patience = 5
     epochs_without_improvement = 0
-    
+
     for epoch in range(start_epoch, epochs):
         epoch_start_time = time.time()
-        
+
+        if use_ddp:
+            train_loader.sampler.set_epoch(epoch)
         # Run training
         avg_train_loss, splice_logits_loss, splice_usage_loss, splice_juncs_loss = train_one_epoch(
             model=model_pretrained,
@@ -832,7 +863,7 @@ def main():
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
         msg += f"Usage: {splice_usage_loss:.4f}) "
-    
+
         # Run validation
         avg_val_loss, val_logits_loss, val_usage_loss, val_juncs_loss = validate_one_epoch(
             model=model_pretrained,
@@ -844,28 +875,32 @@ def main():
         msg += f"Val Loss: {avg_val_loss:.4f} "
         msg += f"(Splice: {val_logits_loss:.4f}, "
         msg += f"Usage: {val_usage_loss:.4f})"
- 
+
         # Timing
         epoch_time = time.time() - epoch_start_time
         msg = f"Epoch {epoch+1}/{epochs} ({epoch_time:.1f}s) - " + msg
-        print(msg)
-        
+        if is_main_process:
+            print(msg)
+
         # Save checkpoint if validation loss improved
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improvement = 0
-            save_model(model_pretrained, optimizer, epoch + 1, save_path)
-            print(f"  - Saved best model {best_val_loss:.4f}")
+            if is_main_process:
+                save_model(model_pretrained, optimizer, epoch + 1, save_path)
+                print(f"  - Saved best model {best_val_loss:.4f}")
         else:
             epochs_without_improvement += 1
-
             if epochs_without_improvement >= patience:
-                print(f"\nEarly stopping triggered after {epoch + 1} epochs (no improvement for {patience} epochs)")
+                if is_main_process:
+                    print(f"\nEarly stopping triggered after {epoch + 1} epochs (no improvement for {patience} epochs)")
                 break
-        
-    print(f"\nTraining complete! Best validation loss ({best_val_loss:.4f}) achieved.")
-    print(f"Total training time: {(time.time() - train_time) / 60:.2f} minutes.")
-    print(f"Total script runtime: {(time.time() - start_time) / 60:.2f} minutes.")
-    
-if __name__ == "__main__":
-    main()
+
+    if is_main_process:
+        print(f"\nTraining complete! Best validation loss ({best_val_loss:.4f}) achieved.")
+        print(f"Total training time: {(time.time() - train_time) / 60:.2f} minutes.")
+        print(f"Total script runtime: {(time.time() - start_time) / 60:.2f} minutes.")
+
+    # DDP cleanup
+    if use_ddp:
+        dist.destroy_process_group()
