@@ -489,11 +489,13 @@ if not args.skip_prediction:
         for org in splice_logits:
             if org not in splice_labels_true:
                 continue
-            logits_org = splice_logits[org].numpy()  # shape: (N, L, 5)
+            # Convert logits to probabilities using softmax
+            logits_tensor = splice_logits[org]  # shape: (N, L, 5), torch.Tensor
+            probs_org = torch.softmax(logits_tensor, dim=-1).numpy()  # shape: (N, L, 5)
             labels_org = splice_labels_true[org].numpy()  # shape: (N, L)
             for class_idx in range(5):
                 y_true = (labels_org == class_idx).astype(np.uint8).flatten()
-                y_score = logits_org[..., class_idx].flatten()
+                y_score = probs_org[..., class_idx].flatten()
                 np.savez_compressed(f"{per_batch_dir}/auprcvec_{org}_class{class_idx}_batch{batch_idx}.npz", y_true=y_true, y_score=y_score)
 
         # For each organism, save detailed info for splice sites only (label != 4) for later analysis and plotting

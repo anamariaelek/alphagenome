@@ -95,8 +95,8 @@ class SpliceDataset(Dataset):
             self.sse = None
 
         # Add splice class
-        labels_ = self.labels.set_index(['sample_idx', 'position'], inplace=False)
-        usage_ = self.sse.set_index(['sample_idx', 'position'], inplace=False)
+        labels_ = self.labels.set_index(['sample_idx', 'position', 'strand'], inplace=False)
+        usage_ = self.sse.set_index(['sample_idx', 'position', 'strand'], inplace=False)
         self.sse = usage_.join(labels_, how='left').reset_index()
 
         # Account for different splice site encoding
@@ -148,10 +148,6 @@ class SpliceDataset(Dataset):
 
         # Extract and adjust splice site positions
         label_seq = self.labels[self.labels['sample_idx'] == idx]
-
-        # Labels on - strand are now indexed from the end of the sequence, so we need to adjust positions
-        #if self.meta_csv.loc[idx, 'strand'] == '-':
-        #    label_seq.loc[:, 'position'] = current_length - 1 - label_seq['position']
         
         # Create dense label array from sparse DataFrame
         splice_labels_dense = np.full(current_length, fill_value=4, dtype=np.int64)

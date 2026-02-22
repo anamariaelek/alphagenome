@@ -21,9 +21,11 @@ warnings.filterwarnings('ignore', category=UserWarning, module='torch.autograd.g
 warnings.filterwarnings('ignore', message='Error detected in.*Backward')
 warnings.filterwarnings('ignore', message='for fsspec: HTTPFileSystem assuming index is current')
 
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
+from torch.amp import autocast, GradScaler
 
 from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig, TargetScaler, MultinomialLoss, JunctionsLoss, config
 from alphagenome_pytorch.splice_dataset import SpliceDataset
@@ -91,23 +93,27 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False):
 
-    # First, set entire model to eval mode
-    model.eval()
+    if freeze_backbone:
+
+        # First, set entire model to eval mode
+        model.eval()
     
-    # Disable running_var updates in custom BatchRMSNorm layers
-    from alphagenome_pytorch.alphagenome import set_update_running_var
-    set_update_running_var(model, False)
-    
-    # Then, only set trainable heads to train mode
-    if heads_to_train and hasattr(model, 'heads'):
-        for organism, heads in model.heads.items():
-            for head_name, head in heads.items():
-                if head_name in heads_to_train:
-                    head.train()
-                    # Re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
-                    set_update_running_var(head, True)
+        # Disable running_var updates in custom BatchRMSNorm layers
+        from alphagenome_pytorch.alphagenome import set_update_running_var
+        set_update_running_var(model, False)
+        
+        # Then, only set trainable heads to train mode
+        if heads_to_train and hasattr(model, 'heads'):
+            for organism, heads in model.heads.items():
+                for head_name, head in heads.items():
+                    if head_name in heads_to_train:
+                        head.train()
+                        # Re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
+                        set_update_running_var(head, True)
+    else:
+        model.train()
     
     total_loss = 0.0
     total_splice_logits_loss = 0.0
@@ -123,18 +129,19 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         splice_donor_idx = batch['splice_donor_idx'].to(device)
         splice_acceptor_idx = batch['splice_acceptor_idx'].to(device)
         context_indices_map = batch['conditions_mask'].to(device)
-        
+
         # Targets
         splice_labels = batch['splice_labels'].to(device)  # (batch, seq_len)
         splice_usage_target = batch['splice_usage_target'].to(device)  # (batch, seq_len, num_contexts)
 
-        # Forward pass
-        preds = model(
-            dna,
-            organism_index,
-            splice_donor_idx=splice_donor_idx,
-            splice_acceptor_idx=splice_acceptor_idx
-        )
+        with autocast(device_type='cuda', enabled=use_amp):
+            # Forward pass
+            preds = model(
+                dna,
+                organism_index,
+                splice_donor_idx=splice_donor_idx,
+                splice_acceptor_idx=splice_acceptor_idx
+            )
         
         # Since batches are species-specific, preds should only contain one organism
         # assert len(preds) == 1, f"Expected 1 organism in batch, got {len(preds)}"
@@ -209,22 +216,24 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
             print("No losses computed for this batch!")
             continue
             
+
         loss = torch.stack(losses).sum()
 
-        # Backpropagation
-        loss.backward()
-
-        # Gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-        optimizer.step()
+        if scaler is not None and use_amp:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
         optimizer.zero_grad()
-        if scheduler is not None:
+        if scheduler is not None and step_in_epoch > 0:
             scheduler.step()  # Step the scheduler after each optimizer step
         step_in_epoch += 1
-        
         total_loss += loss.item()
-
         num_batches += 1    
 
     avg_loss = total_loss / max(num_batches, 1)    
@@ -235,7 +244,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
     return avg_loss, avg_splice_logits_loss, avg_splice_usage_loss, avg_splice_juncs_loss
 
 @torch.no_grad()
-def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cuda'):
+def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cuda', use_amp=True):
     """Run validation and return average loss."""
     model.eval()
     
@@ -254,13 +263,14 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
         splice_usage_target = batch['splice_usage_target'].to(device)
         context_indices_map = batch['conditions_mask'].to(device)
 
-        # Forward pass
-        preds = model(
-            dna,
-            organism_index=organism_index,
-            splice_donor_idx=splice_donor_idx,
-            splice_acceptor_idx=splice_acceptor_idx
-        )
+        with autocast(device_type='cuda', enabled=use_amp):
+            # Forward pass
+            preds = model(
+                dna,
+                organism_index=organism_index,
+                splice_donor_idx=splice_donor_idx,
+                splice_acceptor_idx=splice_acceptor_idx
+            )
 
         # Compute losses for batch organisms only
         losses = []
@@ -795,7 +805,7 @@ def main():
         lr=lr,
         weight_decay=0.01
     )
-    
+
     # Calculate total steps
     total_steps = epochs * len(train_loader)
     warmup_steps = len(train_loader)  # 1 epoch
@@ -820,21 +830,25 @@ def main():
         'splice_sites_junctions': JunctionsLoss()
     }
 
+    # Set up GradScaler for mixed precision
+    scaler = GradScaler('cuda') if torch.cuda.is_available() else None
+    use_amp = False #torch.cuda.is_available()
+
     if resume_from_checkpoint:
         print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
     else:
         print(f"\nStarting training for {epochs} epochs...")
-    
+
     print(f"Train size: {train_size}, Validation size: {val_size}")
     print(f"Train batches per epoch: {len(train_loader)}")
     print(f"Validation batches per epoch: {len(val_loader)}")
     best_val_loss = float('inf')
     patience = 5
     epochs_without_improvement = 0
-    
+
     for epoch in range(start_epoch, epochs):
         epoch_start_time = time.time()
-        
+
         # Run training
         avg_train_loss, splice_logits_loss, splice_usage_loss, splice_juncs_loss = train_one_epoch(
             model=model_pretrained,
@@ -844,29 +858,33 @@ def main():
             species_mapping=species_mapping,
             device=device,
             heads_to_train=heads_to_train,
-            scheduler=scheduler
+            scheduler=scheduler,
+            scaler=scaler,
+            use_amp=use_amp,
+            freeze_backbone=freeze_backbone
         )
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
         msg += f"Usage: {splice_usage_loss:.4f}) "
-    
+
         # Run validation
         avg_val_loss, val_logits_loss, val_usage_loss, val_juncs_loss = validate_one_epoch(
             model=model_pretrained,
             val_loader=val_loader,
             loss_fns=loss_fns,
             species_mapping=species_mapping,
-            device=device
+            device=device,
+            use_amp=use_amp
         )
         msg += f"Val Loss: {avg_val_loss:.4f} "
         msg += f"(Splice: {val_logits_loss:.4f}, "
         msg += f"Usage: {val_usage_loss:.4f})"
- 
+
         # Timing
         epoch_time = time.time() - epoch_start_time
         msg = f"Epoch {epoch+1}/{epochs} ({epoch_time:.1f}s) - " + msg
         print(msg)
-        
+
         # Save checkpoint if validation loss improved
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -879,10 +897,10 @@ def main():
             if epochs_without_improvement >= patience:
                 print(f"\nEarly stopping triggered after {epoch + 1} epochs (no improvement for {patience} epochs)")
                 break
-        
+
     print(f"\nTraining complete! Best validation loss ({best_val_loss:.4f}) achieved.")
     print(f"Total training time: {(time.time() - train_time) / 60:.2f} minutes.")
     print(f"Total script runtime: {(time.time() - start_time) / 60:.2f} minutes.")
-    
+
 if __name__ == "__main__":
     main()
