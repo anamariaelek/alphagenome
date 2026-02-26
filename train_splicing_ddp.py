@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import os
 from pathlib import Path
 from statistics import mode
 import yaml
@@ -11,7 +12,9 @@ import time
 import numpy as np
 import warnings
 
-from tests.test_selective_inference import model
+
+# Set PyTorch memory config for CUDA fragmentation issues
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # Suppress warnings
 warnings.filterwarnings('ignore', message='Initializing zero-element tensors')
@@ -26,7 +29,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
 from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig, TargetScaler, MultinomialLoss, JunctionsLoss, config
-from alphagenome_pytorch.splice_dataset import SpliceDataset
+from alphagenome_pytorch.data.splice_dataset import SpliceDataset
 from alphagenome_pytorch.samplers import SpeciesGroupedSampler
 
 def exists(v):
@@ -93,144 +96,152 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None):
 
-    # First, set entire model to eval mode
-    model.eval()
-    
-    # Disable running_var updates in custom BatchRMSNorm layers
-    from alphagenome_pytorch.alphagenome import set_update_running_var
-    set_update_running_var(model, False)
-    
-    # Then, only set trainable heads to train mode
-    if heads_to_train and hasattr(model, 'heads'):
-        for organism, heads in model.heads.items():
-            for head_name, head in heads.items():
-                if head_name in heads_to_train:
-                    head.train()
-                    # Re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
-                    set_update_running_var(head, True)
-    
+from torch.amp import autocast, GradScaler
+import torch.distributed as dist
+
+def reduce_tensor(tensor, world_size):
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    rt /= world_size
+    return rt
+
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1):
+    if freeze_backbone:
+        model.eval()
+        from alphagenome_pytorch.alphagenome import set_update_running_var
+        set_update_running_var(model, False)
+        if heads_to_train and hasattr(model, 'heads'):
+            for organism, heads in model.heads.items():
+                for head_name, head in heads.items():
+                    if head_name in heads_to_train:
+                        head.train()
+                        set_update_running_var(head, True)
+    else:
+        model.train()
+
     total_loss = 0.0
     total_splice_logits_loss = 0.0
     total_splice_usage_loss = 0.0
     total_splice_juncs_loss = 0.0
     num_batches = 0
+    step_in_epoch = 0
 
+    optimizer.zero_grad()
     for batch in dataloader:
-        # Move inputs to device
         dna = batch['dna'].to(device)
         organism_index = batch['organism_index'].to(device)
         splice_donor_idx = batch['splice_donor_idx'].to(device)
         splice_acceptor_idx = batch['splice_acceptor_idx'].to(device)
         context_indices_map = batch['conditions_mask'].to(device)
-        
-        # Targets
-        splice_labels = batch['splice_labels'].to(device)  # (batch, seq_len)
-        splice_usage_target = batch['splice_usage_target'].to(device)  # (batch, seq_len, num_contexts)
+        splice_labels = batch['splice_labels'].to(device)
+        splice_usage_target = batch['splice_usage_target'].to(device)
 
-        # Forward pass
-        preds = model(
-            dna,
-            organism_index,
-            splice_donor_idx=splice_donor_idx,
-            splice_acceptor_idx=splice_acceptor_idx
-        )
-        
-        # Since batches are species-specific, preds should only contain one organism
-        # assert len(preds) == 1, f"Expected 1 organism in batch, got {len(preds)}"
-        # But the model actually calculates predictions for both species
-        # so I will only use predictions for batch species for loss calculation
+        with autocast(device_type='cuda', enabled=use_amp):
+            preds = model(
+                dna,
+                organism_index,
+                splice_donor_idx=splice_donor_idx,
+                splice_acceptor_idx=splice_acceptor_idx
+            )
 
-        # Compute losses for batch organism
         losses = []
         batch_organism = organism_index.unique().tolist()
         for org_name, org_preds in preds.items():
-            # Skip organisms not in this batch
             if org_name not in [get_organism_name(org_idx, species_mapping) for org_idx in batch_organism]:
                 continue
-            # Splice logits loss (5-class classification: none, donor, acceptor, etc.)
             if 'splice_sites_classification' in org_preds:
-                splice_logits = org_preds['splice_sites_classification']  # (batch, seq_len, 5)
+                splice_logits = org_preds['splice_sites_classification']
                 splice_logits_flat = splice_logits.reshape(-1, splice_logits.shape[-1])
                 splice_labels_flat = splice_labels.reshape(-1)
                 splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat, splice_labels_flat)
                 losses.append(splice_logits_loss)
                 total_splice_logits_loss += splice_logits_loss.item()
-            
-            # Splice usage loss (per-context usage prediction)
             if 'splice_sites_usage' in org_preds:
-                splice_usage = org_preds['splice_sites_usage']  # (batch, seq_len, num_contexts_for_organism)
-            
-                # Get which SSE columns this organism uses
-                sse_columns = context_indices_map[0]  # Get first element since all in batch are same organism
-                
-                # Since batches are species-specific, all sequences are from this organism
-                # Select only the relevant SSE columns for this organism
-                org_sse_target = splice_usage_target[:, :, sse_columns]  # (batch, seq_len, num_contexts_for_organism)
-                
-                # Only compute loss at splice site positions (labels != 0)
-                splice_site_mask = splice_labels != 0  # (batch, seq_len)
-                
+                splice_usage = org_preds['splice_sites_usage']
+                sse_columns = context_indices_map[0]
+                org_sse_target = splice_usage_target[:, :, sse_columns]
+                splice_site_mask = splice_labels != 0
                 if splice_site_mask.any():
-                    # Select only splice site positions
-                    splice_usage_at_sites = splice_usage[splice_site_mask]  # (num_sites, num_contexts)
-                    org_sse_target_at_sites = org_sse_target[splice_site_mask]  # (num_sites, num_contexts)
-                    
-                    # Check for NaN/Inf in targets and replace with zeros
+                    splice_usage_at_sites = splice_usage[splice_site_mask]
+                    org_sse_target_at_sites = org_sse_target[splice_site_mask]
                     if torch.isnan(org_sse_target_at_sites).any() or torch.isinf(org_sse_target_at_sites).any():
                         org_sse_target_at_sites = torch.nan_to_num(org_sse_target_at_sites, nan=0.0, posinf=1.0, neginf=0.0)
-                    
-                    # Skip siites (i.e. rows) where all targets are zero (no signal)
                     if (org_sse_target_at_sites.sum(dim=1) == 0).any():
                         non_zero_mask = org_sse_target_at_sites.sum(dim=1) != 0
                         splice_usage_at_sites = splice_usage_at_sites[non_zero_mask]
                         org_sse_target_at_sites = org_sse_target_at_sites[non_zero_mask]
-                    
-                    # Skip if predictions contain NaN
                     if not (torch.isnan(splice_usage_at_sites).any() or torch.isinf(splice_usage_at_sites).any()):
-                        # Compute MSE loss
                         splice_usage_loss = loss_fns['splice_sites_usage'](splice_usage_at_sites, org_sse_target_at_sites)
-                        
                         if not torch.isnan(splice_usage_loss):
                             losses.append(splice_usage_loss)
                             total_splice_usage_loss += splice_usage_loss.item()
-
-            
-            # Splice junction loss (donor-acceptor pairings)
             if 'splice_sites_junctions' in org_preds:
-                splice_juncs = org_preds['splice_sites_junctions']  # (batch, num_donors, num_acceptors, num_contexts)
-                # Create target junction matrix (placeholder - adjust based on your data)
-                # For now, use a simple loss
-                splice_juncs_loss = loss_fns['splice_sites_junctions'](splice_juncs, splice_juncs)  # Placeholder
-                losses.append(splice_juncs_loss * 0)  # Weight down for now
+                splice_juncs = org_preds['splice_sites_junctions']
+                splice_juncs_loss = loss_fns['splice_sites_junctions'](splice_juncs, splice_juncs)
+                losses.append(splice_juncs_loss * 0)
                 total_splice_juncs_loss += splice_juncs_loss.item()
 
         if len(losses) == 0:
             print("No losses computed for this batch!")
             continue
-            
+
         loss = torch.stack(losses).sum()
+        loss = loss / grad_accum_steps
 
-        # Backpropagation
-        loss.backward()
+        if scaler is not None and use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        # Gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if (num_batches + 1) % grad_accum_steps == 0:
+            if scaler is not None and use_amp:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            optimizer.zero_grad()
+            if scheduler is not None and step_in_epoch > 0:
+                scheduler.step()
+            step_in_epoch += 1
 
-        optimizer.step()
+        total_loss += loss.item() * grad_accum_steps
+        num_batches += 1
+
+    if num_batches % grad_accum_steps != 0:
+        if scaler is not None and use_amp:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
         optimizer.zero_grad()
+        if scheduler is not None and step_in_epoch > 0:
+            scheduler.step()
+        step_in_epoch += 1
 
-        total_loss += loss.item()
-
-        num_batches += 1    
-
-    avg_loss = total_loss / max(num_batches, 1)    
-    avg_splice_juncs_loss = total_splice_juncs_loss / max(num_batches, 1)
-    avg_splice_logits_loss = total_splice_logits_loss / max(num_batches, 1)    
-    avg_splice_usage_loss = total_splice_usage_loss / max(num_batches, 1)
-    
-    return avg_loss, avg_splice_logits_loss, avg_splice_usage_loss, avg_splice_juncs_loss
+    # Distributed loss reduction
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    avg_loss = torch.tensor(total_loss / max(num_batches, 1), device=device)
+    avg_splice_juncs_loss = torch.tensor(total_splice_juncs_loss / max(num_batches, 1), device=device)
+    avg_splice_logits_loss = torch.tensor(total_splice_logits_loss / max(num_batches, 1), device=device)
+    avg_splice_usage_loss = torch.tensor(total_splice_usage_loss / max(num_batches, 1), device=device)
+    if world_size > 1:
+        avg_loss = reduce_tensor(avg_loss, world_size)
+        avg_splice_juncs_loss = reduce_tensor(avg_splice_juncs_loss, world_size)
+        avg_splice_logits_loss = reduce_tensor(avg_splice_logits_loss, world_size)
+        avg_splice_usage_loss = reduce_tensor(avg_splice_usage_loss, world_size)
+    return (
+        avg_loss.item(),
+        avg_splice_logits_loss.item(),
+        avg_splice_usage_loss.item(),
+        avg_splice_juncs_loss.item(),
+    )
 
 @torch.no_grad()
 def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cuda'):
@@ -385,6 +396,7 @@ def main():
     # Config params
     seq_len = config.get('seq_len', 10240)
     batch_size = config.get('batch_size', 32)
+    grad_accum_steps = config.get('grad_accum_steps', 1)
     epochs = config.get('epochs', 20)
     lr = config.get('lr', 1e-5)
     validation_fraction = config.get('validation_fraction', 0.2)
@@ -776,14 +788,20 @@ def main():
             sampler=train_sampler,
             batch_size=batch_size,
             num_workers=num_workers,
-            pin_memory=True
+            persistent_workers=False,
+            prefetch_factor=2,
+            timeout=600,
+            pin_memory=False
         )
         val_loader = DataLoader(
             val_subset,
             sampler=val_sampler,
             batch_size=batch_size,
             num_workers=num_workers,
-            pin_memory=True
+            persistent_workers=False,
+            prefetch_factor=2,
+            timeout=600,
+            pin_memory=False
         )
     else:
         train_sampler = SpeciesGroupedSampler(train_subset, batch_size=batch_size, shuffle=True)
@@ -792,13 +810,19 @@ def main():
             train_subset,
             batch_sampler=train_sampler,
             num_workers=num_workers,
-            pin_memory=True
+            persistent_workers=False,
+            prefetch_factor=2,
+            timeout=600,
+            pin_memory=False
         )
         val_loader = DataLoader(
             val_subset,
             batch_sampler=val_sampler,
             num_workers=num_workers,
-            pin_memory=True
+            persistent_workers=False,
+            prefetch_factor=2,
+            timeout=600,
+            pin_memory=False
         )
 
     if is_main_process:
@@ -824,12 +848,16 @@ def main():
         if is_main_process:
             print("Loaded optimizer state from checkpoint")
 
+
     # Losses for splicing tasks only
     loss_fns = {
         'splice_sites_classification': nn.CrossEntropyLoss(),
         'splice_sites_usage': nn.BCEWithLogitsLoss(),
         'splice_sites_junctions': JunctionsLoss()
     }
+
+    scaler = GradScaler('cuda') if torch.cuda.is_available() else None
+    use_amp = True # Enable AMP by default for DDP
 
     if resume_from_checkpoint:
         if is_main_process:
@@ -850,7 +878,6 @@ def main():
 
         if use_ddp:
             train_loader.sampler.set_epoch(epoch)
-        # Run training
         avg_train_loss, splice_logits_loss, splice_usage_loss, splice_juncs_loss = train_one_epoch(
             model=model_pretrained,
             dataloader=train_loader,
@@ -858,31 +885,34 @@ def main():
             loss_fns=loss_fns,
             species_mapping=species_mapping,
             device=device,
-            heads_to_train=heads_to_train
+            heads_to_train=heads_to_train,
+            scheduler=None,
+            scaler=scaler,
+            use_amp=use_amp,
+            freeze_backbone=freeze_backbone,
+            grad_accum_steps=grad_accum_steps
         )
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
         msg += f"Usage: {splice_usage_loss:.4f}) "
 
-        # Run validation
         avg_val_loss, val_logits_loss, val_usage_loss, val_juncs_loss = validate_one_epoch(
             model=model_pretrained,
             val_loader=val_loader,
             loss_fns=loss_fns,
             species_mapping=species_mapping,
-            device=device
+            device=device,
+            use_amp=use_amp
         )
         msg += f"Val Loss: {avg_val_loss:.4f} "
         msg += f"(Splice: {val_logits_loss:.4f}, "
         msg += f"Usage: {val_usage_loss:.4f})"
 
-        # Timing
         epoch_time = time.time() - epoch_start_time
         msg = f"Epoch {epoch+1}/{epochs} ({epoch_time:.1f}s) - " + msg
         if is_main_process:
             print(msg)
 
-        # Save checkpoint if validation loss improved
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improvement = 0

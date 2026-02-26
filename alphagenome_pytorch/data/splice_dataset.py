@@ -58,11 +58,9 @@ class SpliceDataset(Dataset):
         seq_dtype = np.dtype(self.meta.get('sequences_dtype'))
         seq_shape = tuple(self.meta.get('sequences_shape'))
         self.sequences = np.memmap(seq_path, dtype=seq_dtype, mode='r', shape=seq_shape)
-
-        # Handle context size if present
-        context_size = self.meta.get('context_size', 0)
-        if context_size > 0:
-            self.sequences = self.sequences[:, context_size:-context_size]
+        # Keep context: do not crop here
+        self.context_size = self.meta.get('context_size', 0)
+        self.window_size = self.meta.get('window_size', 0)
 
         #
         # Labels
@@ -117,13 +115,15 @@ class SpliceDataset(Dataset):
     def __getitem__(self, idx):
         # Convert one-hot to integer encoding
         seq = self.sequences[idx]  # (seq_len, 4) or (4, seq_len)
-               
+        seq_len = seq.shape[0] if seq.shape[-1] == 4 else seq.shape[1]
+
         # Reverse complement strand - sequences
-        if self.meta_csv.loc[idx, 'strand'] == '-':
+        strand = self.meta_csv.loc[idx, 'strand']
+        if strand == '-':
             if seq.shape[-1] == 4:
                 seq = seq[:, ::-1]  # Complement (seq_len, 4)
             else:
-                seq = seq[:, ::-1]  # Complement (4, seq_len)
+                seq = seq[::-1, :]  # Complement (4, seq_len)
 
         # Convert to integer encoding (0=A, 1=C, 2=G, 3=T, -1=padding)
         if seq.shape[-1] == 4:
@@ -134,21 +134,22 @@ class SpliceDataset(Dataset):
         # Crop/pad to target length
         current_length = len(dna)
         if current_length > self.target_length:
-            # Center crop
             crop_start = (current_length - self.target_length) // 2
-            dna = dna[crop_start:crop_start + self.target_length]
+            crop_end = crop_start + self.target_length
+            dna_cropped = dna[crop_start:crop_end]
         elif current_length < self.target_length:
-            # Pad with -1s
-            padding = self.target_length - current_length
-            dna = np.pad(dna, (0, padding), constant_values=-1)
             crop_start = 0
+            crop_end = current_length
+            padding = self.target_length - current_length
+            dna_cropped = np.pad(dna, (0, padding), constant_values=-1)
         else:
             crop_start = 0
-        crop_end = crop_start + self.target_length
+            crop_end = self.target_length
+            dna_cropped = dna
 
         # Extract and adjust splice site positions
         label_seq = self.labels[self.labels['sample_idx'] == idx]
-        
+
         # Create dense label array from sparse DataFrame
         splice_labels_dense = np.full(current_length, fill_value=4, dtype=np.int64)
         for _, row in label_seq.iterrows():
@@ -156,25 +157,25 @@ class SpliceDataset(Dataset):
             label = int(row['label'])
             if 0 <= pos < current_length:
                 splice_labels_dense[pos] = label
-        
+
         # Find donor and acceptor positions
         donor_pos = label_seq[(label_seq['label'] == 0) | (label_seq['label'] == 2)]['position'].values
         acceptor_pos = label_seq[(label_seq['label'] == 1) | (label_seq['label'] == 3)]['position'].values
-        
+
         # Adjust for cropping
         donor_pos = donor_pos[(donor_pos >= crop_start) & (donor_pos < crop_end)] - crop_start
         acceptor_pos = acceptor_pos[(acceptor_pos >= crop_start) & (acceptor_pos < crop_end)] - crop_start
-        
+
         # Store actual counts of acceptor/donor sites
         num_donors = len(donor_pos)
         num_acceptors = len(acceptor_pos)
-        
+
         # Fallback if no sites found
         if len(donor_pos) == 0:
             donor_pos = np.array([0])
         if len(acceptor_pos) == 0:
             acceptor_pos = np.array([0])
-        
+
         # Pad to fixed size
         donor_padded = np.pad(donor_pos[:self.max_donor_sites],
                              (0, max(0, self.max_donor_sites - len(donor_pos))),
@@ -182,30 +183,27 @@ class SpliceDataset(Dataset):
         acceptor_padded = np.pad(acceptor_pos[:self.max_acceptor_sites],
                                 (0, max(0, self.max_acceptor_sites - len(acceptor_pos))),
                                 mode='edge')[:self.max_acceptor_sites]
-        
+
         # Crop/pad splice labels to target length
         if current_length > self.target_length:
-            # Center crop
             splice_labels_final = splice_labels_dense[crop_start:crop_end]
         elif current_length < self.target_length:
-            # Pad with zeros
             padding = self.target_length - current_length
-            splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=4) # Pad with not-a-splice-site label
+            splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=4)
         else:
             splice_labels_final = splice_labels_dense
-        
+
         # Get organism index
         species_id = self.species.iloc[idx]
-        # Handle both string species names and integer indices
         if isinstance(species_id, (int, np.integer)):
             organism_idx = int(species_id)
         else:
             organism_idx = self.species_mapping.get(species_id, 0)
-        
+
         # Get organism name
         organism_idx_to_name = {v: k for k, v in self.species_mapping.items()}
         organism_name = organism_idx_to_name.get(organism_idx, 'unknown')
-        
+
         # Get usage SSE for this sequence if available
         if self.sse is not None:
             n_conds = self.sse['condition_idx'].nunique()
@@ -217,24 +215,38 @@ class SpliceDataset(Dataset):
                 sse_value = row['sse']
                 if 0 <= position < current_length:
                     sse[position, condition_idx] = sse_value
-            # Crop/pad to target length
             if current_length > self.target_length:
-                # Center crop
-                sse_target = sse[crop_start:crop_start + self.target_length]
+                sse_target = sse[crop_start:crop_end]
             elif current_length < self.target_length:
-                # Pad with zeros
                 padding = self.target_length - current_length
                 sse_target = np.pad(sse, ((0, padding), (0, 0)), constant_values=0)
             else:
                 sse_target = sse
         else:
             sse_target = np.zeros((self.target_length, 1), dtype=np.float32)
-        
+
         # Get conditions mask for this sequence (per-sequence depending on organism)
         conditions_mask_array = self.condition_map.get(organism_name, [])
 
+        # Compute gene region relative coordinates
+        row = self.meta_csv.iloc[idx]
+        gene_start_abs = int(row['central_gene_start'])
+        gene_end_abs = int(row['central_gene_end'])
+        window_with_context_start = int(row['window_with_context_start'])
+        window_with_context_end = int(row['window_with_context_end'])
+        # Relative to sequence start (with context)
+        gene_start_rel = gene_start_abs - window_with_context_start
+        gene_end_rel = gene_end_abs - window_with_context_start
+        # Adjust for cropping
+        if current_length > self.target_length:
+            gene_start_rel = gene_start_rel - crop_start
+            gene_end_rel = gene_end_rel - crop_start
+        # Clamp to valid range
+        gene_start_rel = max(0, min(self.target_length, gene_start_rel))
+        gene_end_rel = max(0, min(self.target_length, gene_end_rel))
+
         return {
-            'dna': torch.tensor(dna, dtype=torch.long),
+            'dna': torch.tensor(dna_cropped, dtype=torch.long),
             'organism_index': torch.tensor(organism_idx, dtype=torch.long),
             'splice_donor_idx': torch.tensor(donor_padded, dtype=torch.long),
             'splice_acceptor_idx': torch.tensor(acceptor_padded, dtype=torch.long),
@@ -243,4 +255,5 @@ class SpliceDataset(Dataset):
             'splice_labels': torch.tensor(splice_labels_final, dtype=torch.long),
             'splice_usage_target': torch.tensor(sse_target, dtype=torch.float32),
             'conditions_mask': torch.tensor(conditions_mask_array, dtype=torch.long),  # (num_contexts,)
+            'gene_region': torch.tensor([gene_start_rel, gene_end_rel], dtype=torch.long),  # [start, end] relative to sequence
         }

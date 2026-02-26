@@ -8,25 +8,25 @@ num_interop_threads: 1  # Number of threads for PyTorch inter-op parallelism
 num_workers: 12
 
 # Training parameters
-seq_len: 10240  # Must be power of 2 (e.g. 4096, 8192, 10240)
-batch_size: 64
+seq_len: 49152
+batch_size: 4
 epochs: 50
 lr: 1.0e-4
 validation_fraction: 0.2  # Fraction of training data to use for validation
 
 # Data paths
-data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_small_10kb/mouse_human/train/'
-max_donor_sites: 20
-max_acceptor_sites: 20
+data_dir: '/home/elek/sds/sd17d003/Anamaria/splicevo/data/splits_small_50kb/mouse_human/train/'
+max_donor_sites: 60
+max_acceptor_sites: 60
 
 # Output directory
-output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/small_10kb/mouse_human'
+output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/small_50kb/mouse_human/'
 model_name: 'finetune_splice_heads'  # Name for the saved model file (without .pt extension)
 
 # Pretrained weights
 load_pretrained: true
 pretrained_model_version: 'all_folds'
-freeze_backbone: true  # Set to true to only train heads
+freeze_backbone: false  # Set to true to only train heads
 heads_to_train: ['splice_sites_classification', 'splice_sites_usage']  # Specify which heads to train e.g. 'splice_sites_classification', 'splice_sites_usage'
 
 # Model architecture (use defaults or customize)

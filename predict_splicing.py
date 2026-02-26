@@ -18,6 +18,8 @@ from torch.utils.data import DataLoader
 
 from sklearn.metrics import precision_recall_curve, auc
 
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -168,6 +170,7 @@ parser.add_argument('--skip-prediction', action='store_true', help='Only run fin
 parser.add_argument('--skip-per-batch-plots', action='store_true', help='Do not save per-batch plots')
 parser.add_argument('--pretrained', action='store_true', help='Use pretrained model instead of finetuned')
 parser.add_argument('--verbose', action='store_true', help='Print detailed per-batch statistics')
+parser.add_argument('--batch_size', type=int, default=None, help='Override batch size from config')
 parser.add_argument('--max-batches', type=int, default=None, help='Maximum number of batches to process (default: all)')
 args = parser.parse_args()
 
@@ -211,7 +214,7 @@ test_data_dir = train_data_dir.replace('/train', '/test') if test_data_dir is No
 target_length = config.get('seq_len', 10240)
 max_donor_sites = config.get('max_donor_sites', 20)
 max_acceptor_sites = config.get('max_acceptor_sites', 20)
-batch_size = config.get('batch_size', 16)
+batch_size = args.batch_size if args.batch_size is not None else config.get('batch_size', 16)
 
 # Output
 model_dir = config.get('output_dir', './outputs/checkpoints/finetuned')

@@ -1,4 +1,4 @@
-from __future__ import annotations
+import os
 
 import argparse
 import os
@@ -21,6 +21,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='torch.autograd.g
 warnings.filterwarnings('ignore', message='Error detected in.*Backward')
 warnings.filterwarnings('ignore', message='for fsspec: HTTPFileSystem assuming index is current')
 
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
 import torch.nn as nn
@@ -28,7 +29,7 @@ from torch.utils.data import DataLoader, Subset
 from torch.amp import autocast, GradScaler
 
 from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig, TargetScaler, MultinomialLoss, JunctionsLoss, config
-from alphagenome_pytorch.splice_dataset import SpliceDataset
+from alphagenome_pytorch.data.splice_dataset import SpliceDataset
 from alphagenome_pytorch.samplers import SpeciesGroupedSampler
 
 def exists(v):
@@ -93,8 +94,7 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False):
-
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1):
     if freeze_backbone:
 
         # First, set entire model to eval mode
@@ -122,20 +122,23 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
     num_batches = 0
     step_in_epoch = 0
 
+    optimizer.zero_grad()
     for batch in dataloader:
+
         # Move inputs to device
         dna = batch['dna'].to(device)
         organism_index = batch['organism_index'].to(device)
         splice_donor_idx = batch['splice_donor_idx'].to(device)
         splice_acceptor_idx = batch['splice_acceptor_idx'].to(device)
         context_indices_map = batch['conditions_mask'].to(device)
+        gene_region = batch['gene_region'].to(device)
 
         # Targets
         splice_labels = batch['splice_labels'].to(device)  # (batch, seq_len)
         splice_usage_target = batch['splice_usage_target'].to(device)  # (batch, seq_len, num_contexts)
 
+        # Forward pass
         with autocast(device_type='cuda', enabled=use_amp):
-            # Forward pass
             preds = model(
                 dna,
                 organism_index,
@@ -147,7 +150,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         # assert len(preds) == 1, f"Expected 1 organism in batch, got {len(preds)}"
         # But the model actually calculates predictions for both species
         # so I will only use predictions for batch species for loss calculation
-
+        
         # Compute losses for batch organism
         losses = []
         batch_organism = organism_index.unique().tolist()
@@ -158,11 +161,21 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
             # Splice logits loss (5-class classification: none, donor, acceptor, etc.)
             if 'splice_sites_classification' in org_preds:
                 splice_logits = org_preds['splice_sites_classification']  # (batch, seq_len, 5)
-                splice_logits_flat = splice_logits.reshape(-1, splice_logits.shape[-1])
+                batch_size, seq_len, num_classes = splice_logits.shape
+                mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=splice_logits.device)
+                for i in range(batch_size):
+                    start, end = gene_region[i][0].item(), gene_region[i][1].item()
+                    start = max(0, min(seq_len, start))
+                    end = max(0, min(seq_len, end))
+                    if end > start:
+                        mask[i, start:end] = True
+                mask_flat = mask.reshape(-1)
+                splice_logits_flat = splice_logits.reshape(-1, num_classes)
                 splice_labels_flat = splice_labels.reshape(-1)
-                splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat, splice_labels_flat)
-                losses.append(splice_logits_loss)
-                total_splice_logits_loss += splice_logits_loss.item()
+                if mask_flat.any():
+                    splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat[mask_flat], splice_labels_flat[mask_flat])
+                    losses.append(splice_logits_loss)
+                    total_splice_logits_loss += splice_logits_loss.item()
             
             # Splice usage loss (per-context usage prediction)
             if 'splice_sites_usage' in org_preds:
@@ -177,7 +190,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 
                 # Only compute loss at splice site positions (labels != 0)
                 splice_site_mask = splice_labels != 0  # (batch, seq_len)
-                
+
                 if splice_site_mask.any():
                     # Select only splice site positions
                     splice_usage_at_sites = splice_usage[splice_site_mask]  # (num_sites, num_contexts)
@@ -215,32 +228,54 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         if len(losses) == 0:
             print("No losses computed for this batch!")
             continue
-            
 
         loss = torch.stack(losses).sum()
 
+        # Scale loss for gradient accumulation
+        loss = loss / grad_accum_steps
+
         if scaler is not None and use_amp:
             scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        # Gradient accumulation step
+        if (num_batches + 1) % grad_accum_steps == 0:
+            if scaler is not None and use_amp:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            optimizer.zero_grad()
+            if scheduler is not None and step_in_epoch > 0:
+                scheduler.step()
+            step_in_epoch += 1
+
+        total_loss += loss.item() * grad_accum_steps
+        num_batches += 1
+
+    if num_batches % grad_accum_steps != 0:
+        if scaler is not None and use_amp:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
         optimizer.zero_grad()
         if scheduler is not None and step_in_epoch > 0:
-            scheduler.step()  # Step the scheduler after each optimizer step
+            scheduler.step()
         step_in_epoch += 1
-        total_loss += loss.item()
-        num_batches += 1    
 
     avg_loss = total_loss / max(num_batches, 1)    
     avg_splice_juncs_loss = total_splice_juncs_loss / max(num_batches, 1)
     avg_splice_logits_loss = total_splice_logits_loss / max(num_batches, 1)    
     avg_splice_usage_loss = total_splice_usage_loss / max(num_batches, 1)
-    
+
     return avg_loss, avg_splice_logits_loss, avg_splice_usage_loss, avg_splice_juncs_loss
 
 @torch.no_grad()
@@ -262,6 +297,7 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
         splice_labels = batch['splice_labels'].to(device)
         splice_usage_target = batch['splice_usage_target'].to(device)
         context_indices_map = batch['conditions_mask'].to(device)
+        gene_region = batch['gene_region'].to(device)
 
         with autocast(device_type='cuda', enabled=use_amp):
             # Forward pass
@@ -283,11 +319,21 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
             # Splice logits loss
             if 'splice_sites_classification' in org_preds:
                 splice_logits = org_preds['splice_sites_classification']
-                splice_logits_flat = splice_logits.reshape(-1, splice_logits.shape[-1])
+                batch_size, seq_len, num_classes = splice_logits.shape
+                mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=splice_logits.device)
+                for i in range(batch_size):
+                    start, end = gene_region[i][0].item(), gene_region[i][1].item()
+                    start = max(0, min(seq_len, start))
+                    end = max(0, min(seq_len, end))
+                    if end > start:
+                        mask[i, start:end] = True
+                mask_flat = mask.reshape(-1)
+                splice_logits_flat = splice_logits.reshape(-1, num_classes)
                 splice_labels_flat = splice_labels.reshape(-1)
-                splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat, splice_labels_flat)
-                losses.append(splice_logits_loss)
-                total_splice_logits_loss += splice_logits_loss.item()
+                if mask_flat.any():
+                    splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat[mask_flat], splice_labels_flat[mask_flat])
+                    losses.append(splice_logits_loss)
+                    total_splice_logits_loss += splice_logits_loss.item()
             
             # Splice usage loss
             if 'splice_sites_usage' in org_preds:
@@ -346,6 +392,13 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
     
     return avg_loss, avg_splice_logits_loss, avg_splice_usage_loss, avg_splice_juncs_loss
 
+def format_time(seconds):
+    """Format seconds into hours:minutes:seconds."""
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+
 def main():
     # torch.autograd.set_detect_anomaly(True)  # Disable for performance
     start_time = time.time()
@@ -384,6 +437,7 @@ def main():
     # Config params
     seq_len = config.get('seq_len', 10240)
     batch_size = config.get('batch_size', 32)
+    grad_accum_steps = config.get('grad_accum_steps', 1)
     epochs = config.get('epochs', 20)
     lr = config.get('lr', 1e-5)
     validation_fraction = config.get('validation_fraction', 0.2)
@@ -573,14 +627,17 @@ def main():
 
     # Initialize the model
     model_pretrained = AlphaGenome(dims, basepairs, dna_embed_width, num_organisms, transformer_kwargs)
-    model_pretrained.add_reference_heads("human")
-    model_pretrained.add_reference_heads('mouse')
 
     # Check if resuming from checkpoint
     resume_from_checkpoint = args.resume is not None
     start_epoch = 0
 
     if resume_from_checkpoint:
+        # Remove existing heads and add new splicing heads
+        model_pretrained.heads = torch.nn.ModuleDict()
+        for organism, head_cfg in heads_cfg.items():
+            model_pretrained.add_heads(organism=organism, **head_cfg)
+
         # When resuming, load the complete model state from checkpoint
         print("Resuming training from checkpoint...")
         
@@ -599,6 +656,8 @@ def main():
         del temp_optimizer
         
     elif load_pretrained:
+        model_pretrained.add_reference_heads("human")
+        model_pretrained.add_reference_heads('mouse')
         # Load pretrained weights
         print(f"Loading pretrained weights from {pretrained_model_version}...")
         cache_dir = Path(cache_dir)
@@ -615,7 +674,7 @@ def main():
             torch.save({'model_state_dict': model_pretrained.state_dict()}, cached_model_path)
             print(f"Model cached to {cached_model_path}")
         
-        # Save classification head weights BEFORE clearing heads
+        # Save classification head weights before clearing heads
         weights_and_biases = dict()
         for organism in ['human', 'mouse']:
             weights_and_biases[organism] = dict()
@@ -779,18 +838,25 @@ def main():
     train_loader = DataLoader(
         train_subset,
         batch_sampler=train_sampler,
+        persistent_workers=False,
         num_workers=num_workers,
-        pin_memory=True
+        prefetch_factor=2,
+        timeout=600,  # Increased timeout from 60 to 600 seconds
+        pin_memory=False  # Set pin_memory to False to avoid CPU-GPU transfer hang
     )
     
     val_loader = DataLoader(
         val_subset,
         batch_sampler=val_sampler,
+        persistent_workers=False,
         num_workers=num_workers,
-        pin_memory=True
+        prefetch_factor=2,
+        timeout=600,  # Increased timeout from 60 to 600 seconds
+        pin_memory=False  # Set pin_memory to False to avoid CPU-GPU transfer hang
     )
-
-    print(f"Data loaders prepared in {time.time() - data_time:.2f} seconds.")
+    loader_end_time = time.time()
+    loader_duration = loader_end_time - data_time
+    print(f"Data loaders prepared in {loader_end_time - data_time:.2f} seconds.")
 
     #
     # Training loop
@@ -832,7 +898,7 @@ def main():
 
     # Set up GradScaler for mixed precision
     scaler = GradScaler('cuda') if torch.cuda.is_available() else None
-    use_amp = False #torch.cuda.is_available()
+    use_amp = False # torch.cuda.is_available()
 
     if resume_from_checkpoint:
         print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
@@ -861,7 +927,8 @@ def main():
             scheduler=scheduler,
             scaler=scaler,
             use_amp=use_amp,
-            freeze_backbone=freeze_backbone
+            freeze_backbone=freeze_backbone,
+            grad_accum_steps=grad_accum_steps
         )
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
@@ -882,7 +949,8 @@ def main():
 
         # Timing
         epoch_time = time.time() - epoch_start_time
-        msg = f"Epoch {epoch+1}/{epochs} ({epoch_time:.1f}s) - " + msg
+        epoch_time_fmt = format_time(epoch_time)
+        msg = f"Epoch {epoch+1}/{epochs} ({epoch_time_fmt}) - " + msg
         print(msg)
 
         # Save checkpoint if validation loss improved
@@ -899,8 +967,11 @@ def main():
                 break
 
     print(f"\nTraining complete! Best validation loss ({best_val_loss:.4f}) achieved.")
-    print(f"Total training time: {(time.time() - train_time) / 60:.2f} minutes.")
-    print(f"Total script runtime: {(time.time() - start_time) / 60:.2f} minutes.")
+    total_train_time = time.time() - train_time
+    total_script_time = time.time() - start_time
+    print(f"Total training time: {format_time(total_train_time)}")
+    print(f"Total data loader time: {format_time(loader_duration)}")
+    print(f"Total script runtime: {format_time(total_script_time)}")
 
 if __name__ == "__main__":
     main()

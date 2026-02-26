@@ -4,7 +4,7 @@ from importlib import import_module
 
 from alphagenome_pytorch.config import AlphaGenomeConfig
 
-from alphagenome_pytorch.splice_dataset import SpliceDataset
+from alphagenome_pytorch.data.splice_dataset import SpliceDataset
 
 # Data loading utilities
 from alphagenome_pytorch.data import (
@@ -107,6 +107,7 @@ __all__ = [
     'DummyGenomeDataset',
     'DummyTargetsDataset',
     'AlphaGenomeTFRecordDataset',
+    'SpliceDataset',
     'DataBatch',
     'collate_batch',
     'BundleName',
