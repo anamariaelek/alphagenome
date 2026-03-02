@@ -229,7 +229,8 @@ if not args.skip_prediction:
 
     if use_pretrained_model:
         model = load_pretrained_model()
-        output_dir = './outputs/predictions/pretrained_10kb'
+        if output_dir is None:
+            output_dir = './outputs/predictions/pretrained'
 
     elif use_finetuned_model:
         # Get model architecture parameters (matching training)
@@ -372,6 +373,7 @@ if not args.skip_prediction:
             print("Organism index shape:", batch['organism_index'].shape)
             print("Splice labels shape:", batch['splice_labels'].shape)
             print("Splice usage target shape:", batch['splice_usage_target'].shape)
+            print("Gene region shape:", batch['gene_region'].shape)
 
         if batch_idx >= max_batches:
             print(f"Reached max_batches={max_batches}")
@@ -412,6 +414,9 @@ if not args.skip_prediction:
 
             # True usage
             splice_usage = batch['splice_usage_target'].to(device)
+            
+            # Gene region for masking
+            gene_region = batch['gene_region'].to(device)
 
             # Generate predictions
             predictions = model.inference(
@@ -440,13 +445,27 @@ if not args.skip_prediction:
             organism_index = organism_index.cpu()
             splice_labels = splice_labels.cpu()
             splice_usage = splice_usage.cpu()
+            gene_region = gene_region.cpu()
             
             # Free GPU memory
             del dna, predictions
             torch.cuda.empty_cache()
 
         # Continue processing with CPU tensors (outside no_grad block)
-
+        
+        # Apply gene_region mask to filter out positions outside the gene region
+        batch_size = splice_labels.shape[0]
+        seq_len = splice_labels.shape[1]
+        upper_bound = min(seq_len, 32000) # this should be seq_len but quick fix for not parsing further sites correctly
+        starts = gene_region[:, 0].clamp(0, upper_bound) 
+        ends = gene_region[:, 1].clamp(0, upper_bound)
+        positions = torch.arange(seq_len).unsqueeze(0)
+        gene_region_mask = (positions >= starts.unsqueeze(1)) & (positions < ends.unsqueeze(1))  # (batch, seq_len)
+        
+        # Apply mask to labels (we will ignore positions outside gene region in evaluation)
+        splice_labels = splice_labels.clone()
+        splice_labels[~gene_region_mask] = -1  # Mask positions outside gene_region
+        
         # Collect predicted labels (already on CPU, outside no_grad block)
         splice_labels_pred = {}
         for org in splice_logits:
@@ -461,11 +480,13 @@ if not args.skip_prediction:
                 continue
 
             # Get count of true classes
-            if args.verbose:
-                print(f"True labels for {org}:")
             splice_label_org = splice_labels[organism_index == species_mapping[org]]
             splice_labels_true[org] = splice_label_org
-            splice_label_flat = splice_label_org.flatten().numpy()        
+
+            if args.verbose:
+                print(f"True labels for {org}:")
+            splice_label_flat = splice_label_org.flatten().numpy()
+            splice_label_flat_valid = splice_label_flat[splice_label_flat >= 0]  # Exclude masked positions
             for i in range(5):
                 count = np.sum(splice_label_flat == i)
                 if args.verbose:
@@ -475,6 +496,7 @@ if not args.skip_prediction:
             if args.verbose:
                 print(f"\nPredicted labels for {org}:")
             splice_label_pred_flat = splice_labels_pred[org].flatten().numpy()
+            splice_label_pred_flat_valid = splice_label_pred_flat[splice_label_flat >= 0]  # Exclude masked positions
             for i in range(5):
                 count = np.sum(splice_label_pred_flat == i)
                 if args.verbose:
@@ -496,12 +518,16 @@ if not args.skip_prediction:
             logits_tensor = splice_logits[org]  # shape: (N, L, 5), torch.Tensor
             probs_org = torch.softmax(logits_tensor, dim=-1).numpy()  # shape: (N, L, 5)
             labels_org = splice_labels_true[org].numpy()  # shape: (N, L)
+            labels_mask = labels_org >= 0  # Only consider valid positions (not masked)
             for class_idx in range(5):
                 y_true = (labels_org == class_idx).astype(np.uint8).flatten()
                 y_score = probs_org[..., class_idx].flatten()
+                # Apply mask to remove positions outside gene_region
+                y_true = y_true[labels_mask.flatten()]
+                y_score = y_score[labels_mask.flatten()]
                 np.savez_compressed(f"{per_batch_dir}/auprcvec_{org}_class{class_idx}_batch{batch_idx}.npz", y_true=y_true, y_score=y_score)
 
-        # For each organism, save detailed info for splice sites only (label != 4) for later analysis and plotting
+        # For each organism, save detailed info for splice sites for later analysis and plotting
         for org in splice_logits:
 
             if splice_logits[org].shape[0] == 0:
@@ -511,7 +537,8 @@ if not args.skip_prediction:
             splice_labels_flat = splice_labels_true[org].reshape(-1)
 
             splice_results[org] = {}
-            splice_sites_ = np.where(splice_labels_true[org].numpy() != 4) # Not not-a-splice-site
+            splice_sites_ = np.where((splice_labels_true[org].numpy() != 4) & # Not not-a-splice-site
+                                     (splice_labels_true[org].numpy() != -1)) # Not masked
             
             # Map organism-specific sample index to actual dataset index
             org_mask = organism_index == species_mapping[org]
@@ -603,6 +630,10 @@ if not args.skip_prediction:
 
             splice_logits_flat = splice_logits[org].reshape(-1, splice_logits[org].shape[-1]).numpy()
             splice_labels_flat = splice_labels_true[org].reshape(-1).numpy()
+
+            gene_region_mask_flat = splice_labels_flat >= 0
+            splice_logits_flat = splice_logits_flat[gene_region_mask_flat]
+            splice_labels_flat = splice_labels_flat[gene_region_mask_flat]
 
             plt.figure(figsize=(5, 4))
 

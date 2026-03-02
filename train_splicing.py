@@ -70,7 +70,7 @@ def save_model(model, optimizer, epoch, path):
 def load_checkpoint(model, optimizer, checkpoint_path, device='cuda'):
     """Load checkpoint and return the starting epoch."""
     print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Handle DataParallel models
     if isinstance(model, nn.DataParallel):
@@ -122,22 +122,38 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
     num_batches = 0
     step_in_epoch = 0
 
+
+    import time
+    first_epoch = getattr(train_one_epoch, '_first_epoch', True)
+    if first_epoch:
+        batch_times = []
+        data_times = []
+        forward_times = []
+        loss_times = []
+        backward_times = []
+        masking_times = []
+        loss_calc_times = []
     optimizer.zero_grad()
     for batch in dataloader:
-
-        # Move inputs to device
+        batch_start = time.time() if first_epoch else None
+        # Data loading
+        data_t0 = time.time() if first_epoch else None
         dna = batch['dna'].to(device)
         organism_index = batch['organism_index'].to(device)
         splice_donor_idx = batch['splice_donor_idx'].to(device)
         splice_acceptor_idx = batch['splice_acceptor_idx'].to(device)
         context_indices_map = batch['conditions_mask'].to(device)
         gene_region = batch['gene_region'].to(device)
+        data_t1 = time.time() if first_epoch else None
+        if first_epoch:
+            data_times.append(data_t1 - data_t0)
 
         # Targets
         splice_labels = batch['splice_labels'].to(device)  # (batch, seq_len)
         splice_usage_target = batch['splice_usage_target'].to(device)  # (batch, seq_len, num_contexts)
 
         # Forward pass
+        forward_t0 = time.time() if first_epoch else None
         with autocast(device_type='cuda', enabled=use_amp):
             preds = model(
                 dna,
@@ -145,101 +161,99 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 splice_donor_idx=splice_donor_idx,
                 splice_acceptor_idx=splice_acceptor_idx
             )
-        
-        # Since batches are species-specific, preds should only contain one organism
-        # assert len(preds) == 1, f"Expected 1 organism in batch, got {len(preds)}"
-        # But the model actually calculates predictions for both species
-        # so I will only use predictions for batch species for loss calculation
-        
+        forward_t1 = time.time() if first_epoch else None
+        if first_epoch:
+            forward_times.append(forward_t1 - forward_t0)
+
         # Compute losses for batch organism
+        loss_t0 = time.time() if first_epoch else None
         losses = []
         batch_organism = organism_index.unique().tolist()
+        batch_organism_names = {get_organism_name(org_idx, species_mapping) for org_idx in batch_organism}
         for org_name, org_preds in preds.items():
-            # Skip organisms not in this batch
-            if org_name not in [get_organism_name(org_idx, species_mapping) for org_idx in batch_organism]:
+            if org_name not in batch_organism_names:
                 continue
-            # Splice logits loss (5-class classification: none, donor, acceptor, etc.)
             if 'splice_sites_classification' in org_preds:
                 splice_logits = org_preds['splice_sites_classification']  # (batch, seq_len, 5)
                 batch_size, seq_len, num_classes = splice_logits.shape
-                mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=splice_logits.device)
-                for i in range(batch_size):
-                    start, end = gene_region[i][0].item(), gene_region[i][1].item()
-                    start = max(0, min(seq_len, start))
-                    end = max(0, min(seq_len, end))
-                    if end > start:
-                        mask[i, start:end] = True
-                mask_flat = mask.reshape(-1)
-                splice_logits_flat = splice_logits.reshape(-1, num_classes)
-                splice_labels_flat = splice_labels.reshape(-1)
-                if mask_flat.any():
-                    splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat[mask_flat], splice_labels_flat[mask_flat])
+                
+                # Filter by organism to match samples in splice_logits
+                org_idx = species_mapping[org_name]
+                org_mask = organism_index == org_idx
+                org_gene_region = gene_region[org_mask]
+                org_splice_labels = splice_labels[org_mask]
+                
+                if first_epoch:
+                    mask_t0 = time.time()
+
+                upper_bound = min(seq_len, splice_acceptor_idx.max().item(), splice_donor_idx.max().item(), 32000) # this should be seq_len but quick fix for not parsing further sites correctly
+                starts = org_gene_region[:, 0].clamp(0, upper_bound) 
+                ends = org_gene_region[:, 1].clamp(0, upper_bound)
+                
+                positions = torch.arange(seq_len, device=splice_logits.device).unsqueeze(0)
+                mask = (positions >= starts.unsqueeze(1)) & (positions < ends.unsqueeze(1))
+                if first_epoch:
+                    mask_t1 = time.time()
+                    masking_times.append(mask_t1 - mask_t0)
+                if mask.any():
+                    if first_epoch:
+                        loss_calc_t0 = time.time()
+                    splice_logits_loss = loss_fns['splice_sites_classification'](
+                        splice_logits[mask],
+                        org_splice_labels[mask]
+                    )
+                    if first_epoch:
+                        loss_calc_t1 = time.time()
+                        loss_calc_times.append(loss_calc_t1 - loss_calc_t0)
                     losses.append(splice_logits_loss)
                     total_splice_logits_loss += splice_logits_loss.item()
-            
-            # Splice usage loss (per-context usage prediction)
             if 'splice_sites_usage' in org_preds:
-                splice_usage = org_preds['splice_sites_usage']  # (batch, seq_len, num_contexts_for_organism)
-            
-                # Get which SSE columns this organism uses
-                sse_columns = context_indices_map[0]  # Get first element since all in batch are same organism
+                splice_usage = org_preds['splice_sites_usage']
+                sse_columns = context_indices_map[0]
                 
-                # Since batches are species-specific, all sequences are from this organism
-                # Select only the relevant SSE columns for this organism
-                org_sse_target = splice_usage_target[:, :, sse_columns]  # (batch, seq_len, num_contexts_for_organism)
+                # Use organism-filtered labels and targets for consistency
+                org_idx = species_mapping[org_name]
+                org_mask = organism_index == org_idx
+                org_splice_labels = splice_labels[org_mask]
+                org_sse_target = splice_usage_target[org_mask, :, :][:, :, sse_columns]
                 
-                # Only compute loss at splice site positions (labels != 0)
-                splice_site_mask = splice_labels != 0  # (batch, seq_len)
-
+                splice_site_mask = org_splice_labels != 0
                 if splice_site_mask.any():
-                    # Select only splice site positions
-                    splice_usage_at_sites = splice_usage[splice_site_mask]  # (num_sites, num_contexts)
-                    org_sse_target_at_sites = org_sse_target[splice_site_mask]  # (num_sites, num_contexts)
-                    
-                    # Check for NaN/Inf in targets and replace with zeros
-                    if torch.isnan(org_sse_target_at_sites).any() or torch.isinf(org_sse_target_at_sites).any():
-                        org_sse_target_at_sites = torch.nan_to_num(org_sse_target_at_sites, nan=0.0, posinf=1.0, neginf=0.0)
-                    
-                    # Skip siites (i.e. rows) where all targets are zero (no signal)
-                    if (org_sse_target_at_sites.sum(dim=1) == 0).any():
-                        non_zero_mask = org_sse_target_at_sites.sum(dim=1) != 0
-                        splice_usage_at_sites = splice_usage_at_sites[non_zero_mask]
-                        org_sse_target_at_sites = org_sse_target_at_sites[non_zero_mask]
-                    
-                    # Skip if predictions contain NaN
-                    if not (torch.isnan(splice_usage_at_sites).any() or torch.isinf(splice_usage_at_sites).any()):
-                        # Compute MSE loss
-                        splice_usage_loss = loss_fns['splice_sites_usage'](splice_usage_at_sites, org_sse_target_at_sites)
-                        
-                        if not torch.isnan(splice_usage_loss):
+                    splice_usage_at_sites = splice_usage[splice_site_mask]
+                    org_sse_target_at_sites = org_sse_target[splice_site_mask]
+                    org_sse_target_at_sites = torch.nan_to_num(org_sse_target_at_sites, nan=0.0, posinf=1.0, neginf=0.0)
+                    valid_rows = torch.isfinite(splice_usage_at_sites).all(dim=1) & (org_sse_target_at_sites.sum(dim=1) != 0)
+                    if valid_rows.any():
+                        splice_usage_loss = loss_fns['splice_sites_usage'](
+                            splice_usage_at_sites[valid_rows],
+                            org_sse_target_at_sites[valid_rows]
+                        )
+                        if torch.isfinite(splice_usage_loss):
                             losses.append(splice_usage_loss)
                             total_splice_usage_loss += splice_usage_loss.item()
-
-            
-            # Splice junction loss (donor-acceptor pairings)
             if 'splice_sites_junctions' in org_preds:
-                splice_juncs = org_preds['splice_sites_junctions']  # (batch, num_donors, num_acceptors, num_contexts)
-                # Create target junction matrix (placeholder - adjust based on your data)
-                # For now, use a simple loss
-                splice_juncs_loss = loss_fns['splice_sites_junctions'](splice_juncs, splice_juncs)  # Placeholder
-                losses.append(splice_juncs_loss * 0)  # Weight down for now
+                splice_juncs = org_preds['splice_sites_junctions']
+                splice_juncs_loss = loss_fns['splice_sites_junctions'](splice_juncs, splice_juncs)
+                losses.append(splice_juncs_loss * 0)
                 total_splice_juncs_loss += splice_juncs_loss.item()
-
         if len(losses) == 0:
             print("No losses computed for this batch!")
             continue
-
         loss = torch.stack(losses).sum()
-
-        # Scale loss for gradient accumulation
         loss = loss / grad_accum_steps
+        loss_t1 = time.time() if first_epoch else None
+        if first_epoch:
+            loss_times.append(loss_t1 - loss_t0)
 
+        backward_t0 = time.time() if first_epoch else None
         if scaler is not None and use_amp:
             scaler.scale(loss).backward()
         else:
             loss.backward()
+        backward_t1 = time.time() if first_epoch else None
+        if first_epoch:
+            backward_times.append(backward_t1 - backward_t0)
 
-        # Gradient accumulation step
         if (num_batches + 1) % grad_accum_steps == 0:
             if scaler is not None and use_amp:
                 scaler.unscale_(optimizer)
@@ -253,9 +267,36 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
             if scheduler is not None and step_in_epoch > 0:
                 scheduler.step()
             step_in_epoch += 1
-
         total_loss += loss.item() * grad_accum_steps
         num_batches += 1
+        if first_epoch:
+            batch_times.append(time.time() - batch_start)
+
+    if num_batches % grad_accum_steps != 0:
+        if scaler is not None and use_amp:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+        optimizer.zero_grad()
+        if scheduler is not None and step_in_epoch > 0:
+            scheduler.step()
+        step_in_epoch += 1
+
+    if first_epoch:
+        print("\nTiming for first epoch:")
+        print(f"  Avg batch time: {np.mean(batch_times):.3f}s")
+        print(f"  Avg data load: {np.mean(data_times):.3f}s")
+        print(f"  Avg forward:   {np.mean(forward_times):.3f}s")
+        print(f"  Total forward: {np.sum(forward_times)/60:.3f}mins")
+        print(f"  Avg loss:      {np.mean(loss_times):.3f}s")
+        print(f"  Total loss: {np.sum(loss_times)/60:.3f}mins")
+        print(f"  Avg backward:  {np.mean(backward_times):.3f}s")
+        print(f"  Total backward: {np.sum(backward_times)/60:.3f}mins")
+        train_one_epoch._first_epoch = False
 
     if num_batches % grad_accum_steps != 0:
         if scaler is not None and use_amp:
@@ -311,27 +352,33 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
         # Compute losses for batch organisms only
         losses = []
         batch_organism = organism_index.unique().tolist()
+        batch_organism_names = {get_organism_name(org_idx, species_mapping) for org_idx in batch_organism}
         
         for org_name, org_preds in preds.items():
             # Skip organisms not in this batch
-            if org_name not in [get_organism_name(org_idx, species_mapping) for org_idx in batch_organism]:
+            if org_name not in batch_organism_names:
                 continue
             # Splice logits loss
             if 'splice_sites_classification' in org_preds:
                 splice_logits = org_preds['splice_sites_classification']
                 batch_size, seq_len, num_classes = splice_logits.shape
-                mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=splice_logits.device)
-                for i in range(batch_size):
-                    start, end = gene_region[i][0].item(), gene_region[i][1].item()
-                    start = max(0, min(seq_len, start))
-                    end = max(0, min(seq_len, end))
-                    if end > start:
-                        mask[i, start:end] = True
-                mask_flat = mask.reshape(-1)
-                splice_logits_flat = splice_logits.reshape(-1, num_classes)
-                splice_labels_flat = splice_labels.reshape(-1)
-                if mask_flat.any():
-                    splice_logits_loss = loss_fns['splice_sites_classification'](splice_logits_flat[mask_flat], splice_labels_flat[mask_flat])
+                
+                # Filter by organism to match samples in splice_logits
+                org_idx = species_mapping[org_name]
+                org_mask = organism_index == org_idx
+                org_gene_region = gene_region[org_mask]
+                org_splice_labels = splice_labels[org_mask]
+                
+                upper_bound = min(seq_len, splice_acceptor_idx.max().item(), splice_donor_idx.max().item(), 32000) # this should be seq_len but quick fix for not parsing further sites correctly
+                starts = org_gene_region[:, 0].clamp(0, upper_bound) 
+                ends = org_gene_region[:, 1].clamp(0, upper_bound)
+                positions = torch.arange(seq_len, device=splice_logits.device).unsqueeze(0)
+                mask = (positions >= starts.unsqueeze(1)) & (positions < ends.unsqueeze(1))
+                if mask.any():
+                    splice_logits_loss = loss_fns['splice_sites_classification'](
+                        splice_logits[mask],
+                        org_splice_labels[mask]
+                    )
                     losses.append(splice_logits_loss)
                     total_splice_logits_loss += splice_logits_loss.item()
             
@@ -342,34 +389,31 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
                 # Get which SSE columns this organism uses
                 sse_columns = context_indices_map[0]  # Get first element since all in batch are same organism
                 
-                # Since batches are species-specific, all sequences are from this organism
+                # Filter by organism to match samples in splice_usage
+                org_idx = species_mapping[org_name]
+                org_mask = organism_index == org_idx
+                org_splice_labels = splice_labels[org_mask]
+                
                 # Select only the relevant SSE columns for this organism
-                org_sse_target = splice_usage_target[:, :, sse_columns]  # (batch, seq_len, num_contexts_for_organism)
+                org_sse_target = splice_usage_target[org_mask, :, :][:, :, sse_columns]  # (num_org_samples, seq_len, num_contexts_for_organism)
                 
                 # Only compute loss at splice site positions (labels != 0)
-                splice_site_mask = splice_labels != 0  # (batch, seq_len)
+                splice_site_mask = org_splice_labels != 0  # (num_org_samples, seq_len)
 
                 if splice_site_mask.any():
                     # Select only splice site positions
                     splice_usage_at_sites = splice_usage[splice_site_mask]  # (num_sites, num_contexts)
                     org_sse_target_at_sites = org_sse_target[splice_site_mask]  # (num_sites, num_contexts)
-                    
-                    # Check for NaN/Inf in targets and replace with zeros
-                    if torch.isnan(org_sse_target_at_sites).any() or torch.isinf(org_sse_target_at_sites).any():
-                        org_sse_target_at_sites = torch.nan_to_num(org_sse_target_at_sites, nan=0.0, posinf=1.0, neginf=0.0)
-                    
-                    # Skip siites (i.e. rows) where all targets are zero (no signal)
-                    if (org_sse_target_at_sites.sum(dim=1) == 0).any():
-                        non_zero_mask = org_sse_target_at_sites.sum(dim=1) != 0
-                        splice_usage_at_sites = splice_usage_at_sites[non_zero_mask]
-                        org_sse_target_at_sites = org_sse_target_at_sites[non_zero_mask]
-                    
-                    # Skip if predictions contain NaN
-                    if not (torch.isnan(splice_usage_at_sites).any() or torch.isinf(splice_usage_at_sites).any()):
-                        # Compute MSE loss
-                        splice_usage_loss = loss_fns['splice_sites_usage'](splice_usage_at_sites, org_sse_target_at_sites)
-                        
-                        if not torch.isnan(splice_usage_loss):
+
+                    org_sse_target_at_sites = torch.nan_to_num(org_sse_target_at_sites, nan=0.0, posinf=1.0, neginf=0.0)
+                    valid_rows = torch.isfinite(splice_usage_at_sites).all(dim=1) & (org_sse_target_at_sites.sum(dim=1) != 0)
+                    if valid_rows.any():
+                        splice_usage_loss = loss_fns['splice_sites_usage'](
+                            splice_usage_at_sites[valid_rows],
+                            org_sse_target_at_sites[valid_rows]
+                        )
+
+                        if torch.isfinite(splice_usage_loss):
                             losses.append(splice_usage_loss)
                             total_splice_usage_loss += splice_usage_loss.item()
             
@@ -665,7 +709,7 @@ def main():
         cached_model_path = cache_dir / f'pretrained_model_{pretrained_model_version}.pt'
         if cached_model_path.exists():
             print(f"Loading pretrained model from cache: {cached_model_path}")
-            checkpoint = torch.load(cached_model_path, map_location='cpu')
+            checkpoint = torch.load(cached_model_path, map_location='cpu', weights_only=False)
             model_pretrained.load_state_dict(checkpoint['model_state_dict'])
         else:
             print("No cached model found. Downloading pretrained weights...")

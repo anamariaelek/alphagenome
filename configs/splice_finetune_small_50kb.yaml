@@ -10,6 +10,7 @@ num_workers: 12
 # Training parameters
 seq_len: 49152
 batch_size: 4
+grad_accum_steps: 4
 epochs: 50
 lr: 1.0e-4
 validation_fraction: 0.2  # Fraction of training data to use for validation
@@ -21,7 +22,7 @@ max_acceptor_sites: 60
 
 # Output directory
 output_dir: '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/small_50kb/mouse_human/'
-model_name: 'finetune_splice_heads'  # Name for the saved model file (without .pt extension)
+model_name: 'finetune'  # Name for the saved model file (without .pt extension)
 
 # Pretrained weights
 load_pretrained: true
@@ -40,9 +41,9 @@ model:
       num_tracks_1bp: 0
       num_tracks_128bp: 0
       num_tracks_contacts: 0
-      num_splicing_contexts: 7 ### Hardcoded (adult 16, small 7)
+      num_splicing_contexts: 7 ### Hardcoded (full 62, adult 16, small 7)
     mouse:
       num_tracks_1bp: 0
       num_tracks_128bp: 0
       num_tracks_contacts: 0
-      num_splicing_contexts: 8 ### Hardcoded (adult 34, small 8)
+      num_splicing_contexts: 8 ### Hardcoded (full 93, adult 34, small 8)

@@ -77,10 +77,14 @@ class SpliceDataset(Dataset):
         # Match alphagenome classes
         self.labels['label'] = self.labels['label'].replace({0:4, 1:0, 2:1, 3:2, 4:3}) # 0=donor+ 1=acceptor+ 2=donor- 3=acceptor- 4=not splice site
             
+        # Account for context
+        self.labels['position'] = self.labels['position'].astype(np.int64)  # Ensure position is int64 for safe addition
+        self.labels['position'] += self.context_size
+
         # Account for different splice site encoding
         self.labels.loc[self.labels['label'] == 0, 'position'] += -2 
         self.labels.loc[self.labels['label'] == 3, 'position'] += -2 
-
+        
         #
         # Usage (SSE)
         #
@@ -91,6 +95,10 @@ class SpliceDataset(Dataset):
             self.sse = pd.read_parquet(sse_path)
         else:
             self.sse = None
+
+        # Account for context
+        self.sse['position'] = self.sse['position'].astype(np.int64)  # Ensure position is int64 for safe addition
+        self.sse['position'] += self.context_size
 
         # Add splice class
         labels_ = self.labels.set_index(['sample_idx', 'position', 'strand'], inplace=False)
@@ -147,6 +155,8 @@ class SpliceDataset(Dataset):
             crop_end = self.target_length
             dna_cropped = dna
 
+        # # Labels
+
         # Extract and adjust splice site positions
         label_seq = self.labels[self.labels['sample_idx'] == idx]
 
@@ -157,14 +167,19 @@ class SpliceDataset(Dataset):
             label = int(row['label'])
             if 0 <= pos < current_length:
                 splice_labels_dense[pos] = label
+        
+        # Crop/pad splice labels to target length
+        if current_length > self.target_length:
+            splice_labels_final = splice_labels_dense[crop_start:crop_end]
+        elif current_length < self.target_length:
+            padding = self.target_length - current_length
+            splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=4)
+        else:
+            splice_labels_final = splice_labels_dense
 
-        # Find donor and acceptor positions
-        donor_pos = label_seq[(label_seq['label'] == 0) | (label_seq['label'] == 2)]['position'].values
-        acceptor_pos = label_seq[(label_seq['label'] == 1) | (label_seq['label'] == 3)]['position'].values
-
-        # Adjust for cropping
-        donor_pos = donor_pos[(donor_pos >= crop_start) & (donor_pos < crop_end)] - crop_start
-        acceptor_pos = acceptor_pos[(acceptor_pos >= crop_start) & (acceptor_pos < crop_end)] - crop_start
+        # Find donor and acceptor positions for junctions
+        donor_pos = np.where(np.isin(splice_labels_final, [0, 2]))[0]
+        acceptor_pos = np.where(np.isin(splice_labels_final, [1, 3]))[0]
 
         # Store actual counts of acceptor/donor sites
         num_donors = len(donor_pos)
@@ -184,14 +199,7 @@ class SpliceDataset(Dataset):
                                 (0, max(0, self.max_acceptor_sites - len(acceptor_pos))),
                                 mode='edge')[:self.max_acceptor_sites]
 
-        # Crop/pad splice labels to target length
-        if current_length > self.target_length:
-            splice_labels_final = splice_labels_dense[crop_start:crop_end]
-        elif current_length < self.target_length:
-            padding = self.target_length - current_length
-            splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=4)
-        else:
-            splice_labels_final = splice_labels_dense
+        # # Usage
 
         # Get organism index
         species_id = self.species.iloc[idx]
