@@ -238,20 +238,24 @@ class SpliceDataset(Dataset):
 
         # Compute gene region relative coordinates
         row = self.meta_csv.iloc[idx]
-        gene_start_abs = int(row['central_gene_start'])
-        gene_end_abs = int(row['central_gene_end'])
-        window_with_context_start = int(row['window_with_context_start'])
-        window_with_context_end = int(row['window_with_context_end'])
-        # Relative to sequence start (with context)
-        gene_start_rel = gene_start_abs - window_with_context_start
-        gene_end_rel = gene_end_abs - window_with_context_start
-        # Adjust for cropping
-        if current_length > self.target_length:
-            gene_start_rel = gene_start_rel - crop_start
-            gene_end_rel = gene_end_rel - crop_start
-        # Clamp to valid range
-        gene_start_rel = max(0, min(self.target_length, gene_start_rel))
-        gene_end_rel = max(0, min(self.target_length, gene_end_rel))
+        if 'central_gene_start' in row and 'central_gene_end' in row and 'window_with_context_start' in row and 'window_with_context_end' in row:
+            gene_start_abs = int(row['central_gene_start'])
+            gene_end_abs = int(row['central_gene_end'])
+            window_with_context_start = int(row['window_with_context_start'])
+            window_with_context_end = int(row['window_with_context_end'])
+            # Relative to sequence start (with context)
+            gene_start_rel = gene_start_abs - window_with_context_start
+            gene_end_rel = gene_end_abs - window_with_context_start
+            # Adjust for cropping
+            if current_length > self.target_length:
+                gene_start_rel = gene_start_rel - crop_start
+                gene_end_rel = gene_end_rel - crop_start
+            # Clamp to valid range
+            gene_start_rel = max(0, min(self.target_length, gene_start_rel))
+            gene_end_rel = max(0, min(self.target_length, gene_end_rel))
+        else:
+            gene_start_rel = 0
+            gene_end_rel = self.target_length
 
         return {
             'dna': torch.tensor(dna_cropped, dtype=torch.long),

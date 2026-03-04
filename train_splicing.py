@@ -113,7 +113,12 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                         # Re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
                         set_update_running_var(head, True)
     else:
+        # Set entire model to train mode
         model.train()
+
+        # Disable running_var updates in custom BatchRMSNorm layers
+        from alphagenome_pytorch.alphagenome import set_update_running_var
+        set_update_running_var(model, False)
     
     total_loss = 0.0
     total_splice_logits_loss = 0.0
@@ -134,7 +139,9 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         masking_times = []
         loss_calc_times = []
     optimizer.zero_grad()
+    batch_idx = -1
     for batch in dataloader:
+        batch_idx += 1
         batch_start = time.time() if first_epoch else None
         # Data loading
         data_t0 = time.time() if first_epoch else None
@@ -186,7 +193,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 if first_epoch:
                     mask_t0 = time.time()
 
-                upper_bound = min(seq_len, splice_acceptor_idx.max().item(), splice_donor_idx.max().item(), 32000) # this should be seq_len but quick fix for not parsing further sites correctly
+                upper_bound = min(seq_len, splice_acceptor_idx.max().item(), splice_donor_idx.max().item())
                 starts = org_gene_region[:, 0].clamp(0, upper_bound) 
                 ends = org_gene_region[:, 1].clamp(0, upper_bound)
                 
@@ -237,7 +244,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 losses.append(splice_juncs_loss * 0)
                 total_splice_juncs_loss += splice_juncs_loss.item()
         if len(losses) == 0:
-            print("No losses computed for this batch!")
+            print(f"No losses computed for batch {batch_idx}!")
             continue
         loss = torch.stack(losses).sum()
         loss = loss / grad_accum_steps
@@ -323,6 +330,10 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
 def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cuda', use_amp=True):
     """Run validation and return average loss."""
     model.eval()
+
+    # Disable running_var updates in custom BatchRMSNorm layers
+    from alphagenome_pytorch.alphagenome import set_update_running_var
+    set_update_running_var(model, False)
     
     total_loss = 0.0
     total_splice_logits_loss = 0.0
@@ -369,7 +380,7 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
                 org_gene_region = gene_region[org_mask]
                 org_splice_labels = splice_labels[org_mask]
                 
-                upper_bound = min(seq_len, splice_acceptor_idx.max().item(), splice_donor_idx.max().item(), 32000) # this should be seq_len but quick fix for not parsing further sites correctly
+                upper_bound = min(seq_len, splice_acceptor_idx.max().item(), splice_donor_idx.max().item())
                 starts = org_gene_region[:, 0].clamp(0, upper_bound) 
                 ends = org_gene_region[:, 1].clamp(0, upper_bound)
                 positions = torch.arange(seq_len, device=splice_logits.device).unsqueeze(0)
