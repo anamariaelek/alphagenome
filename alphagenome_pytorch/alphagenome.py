@@ -29,6 +29,18 @@ if torch.cuda.is_available():
 # performance on modern GPUs). Set ALPHAGENOME_TORCH_BF16=0 to disable.
 _ALLOW_NATIVE_BF16 = os.environ.get("ALPHAGENOME_TORCH_BF16", "1") == "1"
 
+try:
+    import matplotlib.pyplot as plt
+    _HAS_MATPLOTLIB = True
+except ImportError:
+    _HAS_MATPLOTLIB = False
+
+try:
+    import logomaker
+    _HAS_LOGOMAKER = True
+except ImportError:
+    _HAS_LOGOMAKER = False
+
 # ein notation
 
 # b - batch
@@ -1961,6 +1973,593 @@ class AlphaGenome(Module):
                 out[organism] = organism_out
 
         return (out, embeds) if return_embeds else out
+
+    def compute_input_gradients(
+        self,
+        seq: Tensor,
+        organism_index: int | Tensor,
+        *,
+        head_name: str,
+        organism: str | None = None,
+        output_index: int | None = None,
+        output_position: int | None = None,
+        gradients_x_input: bool = False,
+        center_per_position: bool = False,
+        return_predictions: bool = False,
+    ) -> Tensor:
+        """Compute gradients of a head output w.r.t. the one-hot input sequence.
+
+        Useful for saliency maps and attribution analysis.
+
+        Args:
+            seq: Input sequence as tokenized Int[B, S] or one-hot Float[B, S, 4].
+            organism_index: Organism index (0=human, 1=mouse) or batch tensor.
+            head_name: Name of the head to differentiate through.
+            organism: Organism key for the head (e.g. 'human'). If None, uses
+                the first organism that has the requested head.
+            output_index: Track/class index to use as the scalar output. If None,
+                uses the sum over all classes.
+            output_position: Sequence position index in the output to differentiate
+                through (e.g. the index of a specific splice site). If None,
+                sums over all output positions. Use this to get gradients that
+                reflect what the model attends to when predicting at a specific
+                site rather than the entire sequence at once.
+            gradients_x_input: If True, returns gradient × input
+                (saliency × one-hot sequence).
+            center_per_position: If True, subtract the per-position mean across
+                nucleotide channels (A/C/G/T) from the attribution tensor.
+            return_predictions: If True, also returns the raw head predictions.
+
+        Returns:
+            gradients Float[B, S, 4], or tuple (gradients, predictions) when
+            return_predictions=True.
+        """
+        # Ensure deterministic behavior by setting model to eval mode
+        was_training = self.training
+        self.eval()
+        
+        # Explicitly disable running_var updates for reproducibility
+        set_update_running_var(self, False)
+        
+        try:
+            if isinstance(organism_index, int):
+                batch = seq.shape[0]
+                organism_index = torch.full((batch,), organism_index, device=seq.device)
+
+            # Build float one-hot if integer tokens were passed
+            if not seq.is_floating_point():
+                onehot = F.one_hot(seq.clamp(min=0), num_classes=4).float()
+                onehot[seq < 0] = 0.0
+            else:
+                onehot = seq.float()
+
+            onehot = onehot.detach().requires_grad_(True)
+
+            # --- replicate TransformerUnet.forward, bypassing F.one_hot in DNAEmbed ---
+            dna_emb = self.transformer_unet.dna_embed
+            x = rearrange(onehot, 'b n d -> b d n')
+            out = dna_emb.conv(x)
+            out = out + dna_emb.pointwise(out)
+            pooled = dna_emb.pool(out)
+
+            skips = [out]  # first skip (pre-pool from dna_embed)
+            x = pooled
+            for down in self.transformer_unet.downs:
+                x, skip = down(x, return_pre_pool=True)
+                skips.append(skip)
+
+            x = rearrange(x, 'b d n -> b n d')
+            organism_embed = self.organism_embed(organism_index)
+            x = add('b n d, b d', x, organism_embed)
+
+            single, pairwise = self.transformer_unet.transformer(x)
+
+            x = rearrange(single, 'b n d -> b d n')
+            for up in self.transformer_unet.ups:
+                skip = skips.pop()
+                x = up(x, skip=skip)
+            unet_out = rearrange(x, 'b d n -> b n d')
+
+            embeds_128bp = self.outembed_128bp(single, organism_index)
+            embeds_1bp = self.outembed_1bp(unet_out, organism_index, embeds_128bp)
+            embeds_pair = self.outembed_pair(pairwise, organism_index)
+
+            head_inputs = dict(
+                embeds_1bp=embeds_1bp,
+                embeds_128bp=embeds_128bp,
+                embeds_pair=embeds_pair,
+                organism_index=organism_index,
+                splice_site_positions=None,
+            )
+
+            # Run the requested head
+            predictions = None
+            for org_key, heads in self.heads.items():
+                if organism is not None and org_key != organism:
+                    continue
+                if head_name in heads:
+                    head = heads[head_name]
+                    head_args = self.head_forward_arg_names[org_key][head_name]
+                    head_arg_map = self.head_forward_arg_maps[org_key][head_name]
+                    kwargs = {ha: head_inputs[ha] for ha in head_args if ha in head_inputs}
+                    kwargs = {(head_arg_map.get(k, k)): v for k, v in kwargs.items()}
+                    predictions = head(**kwargs)
+                    break
+
+            if predictions is None:
+                available = [f"{org}/{h}" for org, hs in self.heads.items() for h in hs]
+                raise ValueError(
+                    f"Head '{head_name}' not found. Available heads: {available}"
+                )
+
+            # Reduce predictions to a scalar for backward
+            if output_position is not None:
+                # Select specific output position (sequence dim) before flattening
+                if isinstance(predictions, dict):
+                    predictions = {k: v[:, output_position] for k, v in predictions.items()
+                                   if isinstance(v, Tensor)}
+                else:
+                    predictions = predictions[:, output_position]
+
+            if isinstance(predictions, dict):
+                tensors = [v for v in predictions.values() if isinstance(v, Tensor)]
+                output = torch.cat([t.reshape(t.size(0), -1) for t in tensors], dim=-1)
+            else:
+                output = predictions
+
+            if output_index is not None:
+                output = output[..., output_index]
+
+            output.sum().backward()
+
+            gradients = onehot.grad.detach()
+
+            if gradients_x_input:
+                gradients = gradients * onehot.detach()
+
+            if center_per_position:
+                gradients = gradients - gradients.mean(dim = -1, keepdim = True)
+
+            if return_predictions:
+                return gradients, predictions
+            return gradients
+        finally:
+            # Restore original training state
+            if was_training:
+                self.train()
+
+    def compute_integrated_gradients(
+        self,
+        seq: Tensor,
+        organism_index: int | Tensor,
+        *,
+        head_name: str,
+        organism: str | None = None,
+        output_index: int | None = None,
+        output_position: int | None = None,
+        baseline: Tensor | str | None = 'uniform',
+        steps: int = 10,
+        center_per_position: bool = False,
+        return_predictions: bool = False,
+    ) -> Tensor:
+        """Compute integrated gradients of a head output w.r.t. the one-hot input sequence.
+
+        Integrated gradients computes attributions by integrating gradients along a
+        straight path from a baseline to the actual input. This provides better
+        axiom compliance (completeness, sensitivity, etc.) compared to vanilla gradients.
+
+        Args:
+            seq: Input sequence as tokenized Int[B, S] or one-hot Float[B, S, 4].
+            organism_index: Organism index (0=human, 1=mouse) or batch tensor.
+            head_name: Name of the head to differentiate through.
+            organism: Organism key for the head (e.g. 'human'). If None, uses
+                the first organism that has the requested head.
+            output_index: Track/class index to use as the scalar output. If None,
+                uses the sum over all classes.
+            output_position: Sequence position index in the output to differentiate
+                through (e.g. the index of a specific splice site). If None,
+                sums over all output positions.
+            baseline: Baseline input for integration. Can be:
+                - 'zeros': All-zero one-hot (N characters)
+                - 'uniform': Uniform distribution [0.25, 0.25, 0.25, 0.25]
+                - Tensor: Custom baseline with shape matching input
+                Default is 'uniform'.
+            steps: Number of interpolation steps for the integral approximation.
+                More steps = more accurate but slower. Default 50.
+            center_per_position: If True, subtract the per-position mean across
+                nucleotide channels (A/C/G/T) from the attribution tensor.
+            return_predictions: If True, also returns predictions at the actual input.
+
+        Returns:
+            integrated_gradients Float[B, S, 4], or tuple (gradients, predictions)
+            when return_predictions=True.
+
+        References:
+            Sundararajan et al. (2017) "Axiomatic Attribution for Deep Networks"
+            https://arxiv.org/abs/1703.01365
+        """
+        # Ensure deterministic behavior
+        was_training = self.training
+        self.eval()
+        set_update_running_var(self, False)
+        
+        try:
+            if isinstance(organism_index, int):
+                batch = seq.shape[0]
+                organism_index = torch.full((batch,), organism_index, device=seq.device)
+
+            # Build float one-hot if integer tokens were passed
+            if not seq.is_floating_point():
+                onehot = F.one_hot(seq.clamp(min=0), num_classes=4).float()
+                onehot[seq < 0] = 0.0
+            else:
+                onehot = seq.float()
+
+            # Create baseline
+            if baseline == 'zeros':
+                baseline_tensor = torch.zeros_like(onehot)
+            elif baseline == 'uniform':
+                baseline_tensor = torch.full_like(onehot, 0.25)
+            elif isinstance(baseline, Tensor):
+                baseline_tensor = baseline.to(onehot.device, dtype=onehot.dtype)
+                if baseline_tensor.shape != onehot.shape:
+                    raise ValueError(
+                        f"Baseline shape {baseline_tensor.shape} doesn't match input shape {onehot.shape}"
+                    )
+            else:
+                raise ValueError(
+                    f"baseline must be 'zeros', 'uniform', or a Tensor. Got {baseline}"
+                )
+
+            # Generate interpolated inputs: baseline + alpha * (input - baseline)
+            # alphas shape: [steps]
+            alphas = torch.linspace(0, 1, steps + 1, device=onehot.device, dtype=onehot.dtype)
+            
+            # Compute difference once
+            input_diff = onehot - baseline_tensor  # [B, S, 4]
+            
+            # Accumulate gradients across all interpolation points
+            integrated_grads = torch.zeros_like(onehot)
+            predictions_at_input = None
+            
+            for alpha in alphas:
+                # Interpolated input: baseline + alpha * (input - baseline)
+                interpolated = baseline_tensor + alpha * input_diff
+                interpolated = interpolated.detach().requires_grad_(True)
+                
+                # Forward pass through the model
+                dna_emb = self.transformer_unet.dna_embed
+                x = rearrange(interpolated, 'b n d -> b d n')
+                out = dna_emb.conv(x)
+                out = out + dna_emb.pointwise(out)
+                pooled = dna_emb.pool(out)
+
+                skips = [out]
+                x = pooled
+                for down in self.transformer_unet.downs:
+                    x, skip = down(x, return_pre_pool=True)
+                    skips.append(skip)
+
+                x = rearrange(x, 'b d n -> b n d')
+                organism_embed = self.organism_embed(organism_index)
+                x = add('b n d, b d', x, organism_embed)
+
+                single, pairwise = self.transformer_unet.transformer(x)
+
+                x = rearrange(single, 'b n d -> b d n')
+                for up in self.transformer_unet.ups:
+                    skip = skips.pop()
+                    x = up(x, skip=skip)
+                unet_out = rearrange(x, 'b d n -> b n d')
+
+                embeds_128bp = self.outembed_128bp(single, organism_index)
+                embeds_1bp = self.outembed_1bp(unet_out, organism_index, embeds_128bp)
+                embeds_pair = self.outembed_pair(pairwise, organism_index)
+
+                head_inputs = dict(
+                    embeds_1bp=embeds_1bp,
+                    embeds_128bp=embeds_128bp,
+                    embeds_pair=embeds_pair,
+                    organism_index=organism_index,
+                    splice_site_positions=None,
+                )
+
+                # Run the requested head
+                preds = None
+                for org_key, heads in self.heads.items():
+                    if organism is not None and org_key != organism:
+                        continue
+                    if head_name in heads:
+                        head = heads[head_name]
+                        head_args = self.head_forward_arg_names[org_key][head_name]
+                        head_arg_map = self.head_forward_arg_maps[org_key][head_name]
+                        kwargs = {ha: head_inputs[ha] for ha in head_args if ha in head_inputs}
+                        kwargs = {(head_arg_map.get(k, k)): v for k, v in kwargs.items()}
+                        preds = head(**kwargs)
+                        break
+
+                if preds is None:
+                    available = [f"{org}/{h}" for org, hs in self.heads.items() for h in hs]
+                    raise ValueError(
+                        f"Head '{head_name}' not found. Available heads: {available}"
+                    )
+
+                # Store predictions at actual input (alpha=1) for return
+                if alpha == 1.0 and return_predictions:
+                    predictions_at_input = preds
+
+                # Reduce to scalar
+                if output_position is not None:
+                    if isinstance(preds, dict):
+                        preds = {k: v[:, output_position] for k, v in preds.items()
+                                 if isinstance(v, Tensor)}
+                    else:
+                        preds = preds[:, output_position]
+
+                if isinstance(preds, dict):
+                    tensors = [v for v in preds.values() if isinstance(v, Tensor)]
+                    output = torch.cat([t.reshape(t.size(0), -1) for t in tensors], dim=-1)
+                else:
+                    output = preds
+
+                if output_index is not None:
+                    output = output[..., output_index]
+
+                # Compute gradients for this interpolation point
+                output.sum().backward()
+                
+                if interpolated.grad is not None:
+                    # Accumulate gradients (trapezoidal rule: average of endpoints)
+                    # Weight endpoints by 0.5, middle points by 1.0
+                    weight = 0.5 if (alpha == 0.0 or alpha == 1.0) else 1.0
+                    integrated_grads += interpolated.grad.detach() * weight
+                
+                # Zero gradients for next iteration
+                if interpolated.grad is not None:
+                    interpolated.grad.zero_()
+
+            # Complete the trapezoidal integration: multiply by step size
+            integrated_grads = integrated_grads / steps
+            
+            # Multiply by (input - baseline) to get final integrated gradients
+            integrated_grads = integrated_grads * input_diff
+
+            if center_per_position:
+                integrated_grads = integrated_grads - integrated_grads.mean(dim = -1, keepdim = True)
+
+            if return_predictions:
+                return integrated_grads, predictions_at_input
+            return integrated_grads
+        
+        finally:
+            if was_training:
+                self.train()
+
+    def plot_sequence_logo(
+        self,
+        sequence: Tensor,
+        gradients: Tensor,
+        *,
+        batch_idx: int = 0,
+        positions: list[int] | Tensor | None = None,
+        window: int = 50,
+        splice_labels: Tensor | None = None,
+        sharey: bool = False,
+        figsize: tuple[int, int] = (20, 3),
+        save_path: str | None = None,
+        dpi: int = 150,
+        threshold: float = 0.0,
+        logo_type: str = 'information',
+        mask_to_sequence: bool = True,
+        use_absolute: bool = False,
+        title: str | None = None,
+        ylim: tuple[float | None, float | None] | None = None,
+    ) -> None:
+        """Plot a sequence logo visualization of attribution scores.
+
+        Args:
+            sequence: One-hot encoded input sequence Float[B, S, 4].
+            gradients: Gradient/attribution scores Float[B, S, 4].
+            batch_idx: Index of batch element to plot.
+            positions: Sequence positions to plot around (e.g. splice site
+                indices). If given, creates one subplot per position cropped
+                to [pos - window, pos + window]. If None, plots the full
+                sequence. Can be derived from splice_labels with e.g.
+                ``(splice_labels[i] != 4).nonzero(as_tuple=True)[0]``.
+            window: Half-window size in bp around each position (default 50).
+            splice_labels: Integer label tensor Int[B, S] with values
+                0=donor+, 1=acceptor+, 2=donor-, 3=acceptor-, 4=no site.
+                When provided, all splice sites visible in each window are
+                annotated with colored vertical lines and a legend.
+            sharey: If True, all subplots share the same y-axis scale.
+                Useful for comparing attribution magnitudes across sites.
+            figsize: Figure size per subplot (width, height) in inches.
+            save_path: Path to save figure. If None, displays it.
+            dpi: Resolution for saved figure.
+            threshold: Minimum attribution score to display.
+            logo_type: 'information', 'probability', or 'weight'. Only used if 
+                mask_to_sequence=False. 'information' scales heights by information 
+                content (bits), 'probability' scales by probability, and 'weight' 
+                uses raw attribution scores.
+            mask_to_sequence: Multiply attributions by one-hot to show only
+                the present nucleotide at each position.
+            use_absolute: Use absolute attribution values for logo heights.
+            title: Figure suptitle. If None, a default title is generated.
+            ylim: Custom y-axis limits as (y_min, y_max). Either value can be None
+                to auto-scale that dimension. For example: (None, 1.0) to only set max,
+                (-0.5, None) to only set min. If fully None, automatically scales based
+                on data with 10% padding.
+        """
+        if not _HAS_MATPLOTLIB:
+            raise ImportError(
+                "matplotlib is required for plotting. Install with: pip install matplotlib"
+            )
+        if not _HAS_LOGOMAKER:
+            raise ImportError(
+                "logomaker is required for sequence logo plotting. Install with: pip install logomaker"
+            )
+
+        import numpy as np
+        import pandas as pd
+        from matplotlib.lines import Line2D
+
+        _CLASS_LABELS = {0: 'donor +', 1: 'acceptor +', 2: 'donor -', 3: 'acceptor -', 4: 'no splice site'}
+        _CLASS_COLORS = {0: '#ff7f00', 1: '#33a02c', 2: '#fdbf6f', 3: '#b2df8a', 4: '#1f78b4'}
+
+        seq_np = sequence[batch_idx].detach().cpu().float().numpy()    # (S, 4)
+        grad_np = gradients[batch_idx].detach().cpu().float().numpy()  # (S, 4)
+
+        if mask_to_sequence:
+            grad_np = grad_np * seq_np
+
+        values_np = np.abs(grad_np) if use_absolute else grad_np
+
+        labels_np = None
+        if splice_labels is not None:
+            labels_np = splice_labels[batch_idx].cpu().numpy()  # (S,)
+
+        def _make_logo_df(v):
+            df = pd.DataFrame(v, columns=['A', 'C', 'G', 'T'])
+            if threshold > 0:
+                # Threshold by magnitude, preserving sign
+                df = df.where(np.abs(df) >= threshold, 0)
+            if not mask_to_sequence:
+                # Only normalize if all values are non-negative
+                # (probability/information normalization doesn't work with negative gradients)
+                has_negative = (df < 0).any().any()
+                if not has_negative:
+                    if logo_type == 'probability':
+                        df = df.div(df.sum(axis=1) + 1e-10, axis=0)
+                    elif logo_type == 'information':
+                        prob = np.asarray(df.div(df.sum(axis=1) + 1e-10, axis=0))
+                        entropy = np.sum(prob * np.log2(prob + 1e-10), axis=1, keepdims=True)
+                        df = pd.DataFrame(prob * (2 + entropy), columns=df.columns, index=df.index)
+                # If has negative values, use raw attribution scores (no normalization)
+            return df
+
+        def _apply_ylim(ax, logo_df, custom_ylim=None):
+            """Apply y-axis limits, respecting None values for partial specification."""
+            if custom_ylim is None or (custom_ylim[0] is None and custom_ylim[1] is None):
+                # Full auto-scale
+                y_min = logo_df.min().min()
+                y_max = logo_df.max().max()
+                y_range = y_max - y_min
+                if y_range > 0:
+                    ax.set_ylim(y_min - 0.1 * y_range, y_max + 0.1 * y_range)
+            else:
+                # Partial specification: use custom values where provided, auto-scale where None
+                y_min_custom, y_max_custom = custom_ylim
+                y_min_data = logo_df.min().min()
+                y_max_data = logo_df.max().max()
+                y_range = y_max_data - y_min_data
+                
+                # Use custom values where provided, otherwise auto-scale
+                y_min = y_min_custom if y_min_custom is not None else (y_min_data - 0.1 * y_range if y_range > 0 else y_min_data)
+                y_max = y_max_custom if y_max_custom is not None else (y_max_data + 0.1 * y_range if y_range > 0 else y_max_data)
+                
+                ax.set_ylim(y_min, y_max)
+
+        def _ylabel():
+            if mask_to_sequence:
+                return 'Attribution'
+            elif logo_type == 'information':
+                return 'Information Content (bits)'
+            elif logo_type == 'probability':
+                return 'Probability'
+            return 'Attribution Score'
+
+        def _annotate_sites(ax, start, end):
+            """Draw vertical lines for all splice sites in [start, end)."""
+            if labels_np is None:
+                return
+            seen_classes = set()
+            for p in range(start, end):
+                cls = int(labels_np[p])
+                if cls == 4:
+                    continue
+                ax.axvline(p, color=_CLASS_COLORS[cls], linewidth=1.2,
+                           linestyle='--', alpha=0.85)
+                seen_classes.add(cls)
+            if seen_classes:
+                handles = [
+                    Line2D([0], [0], color=_CLASS_COLORS[c], linewidth=1.5,
+                           linestyle='--', label=_CLASS_LABELS[c])
+                    for c in sorted(seen_classes)
+                ]
+                ax.legend(handles=handles, fontsize=8, loc='upper right',
+                          framealpha=0.7)
+
+        seq_len = values_np.shape[0]
+
+        if positions is None:
+            # --- full-sequence plot ---
+            fig, ax = plt.subplots(figsize=figsize)
+            logo_df = _make_logo_df(values_np)
+            logomaker.Logo(logo_df, ax=ax,
+                           color_scheme='classic', show_spines=True, baseline_width=0.5)
+            # Set y-axis limits: use custom if provided, otherwise auto-scale
+            _apply_ylim(ax, logo_df, ylim)
+            ax.set_xlabel('Position in Sequence', fontsize=12)
+            ax.set_ylabel(_ylabel(), fontsize=12)
+            ax.set_title(title or 'Sequence Logo: Attributions', fontsize=14)
+            ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+            _annotate_sites(ax, 0, seq_len)
+        else:
+            # --- one subplot per splice site ---
+            if isinstance(positions, Tensor):
+                positions = positions.cpu().tolist()
+            positions = [int(p) for p in positions]
+            n = len(positions)
+            
+            # Calculate global y_min and y_max if sharey=True
+            global_y_min, global_y_max = None, None
+            if sharey:
+                all_dfs = [_make_logo_df(values_np[max(0, p - window):min(seq_len, p + window + 1)]) 
+                           for p in positions]
+                if all_dfs:
+                    global_y_min = min(df.min().min() for df in all_dfs)
+                    global_y_max = max(df.max().max() for df in all_dfs)
+            
+            fig, axes = plt.subplots(n, 1, figsize=(figsize[0], figsize[1] * n),
+                                     squeeze=False, sharey=sharey)
+            for idx, pos in enumerate(positions):
+                start = max(0, pos - window)
+                end = min(seq_len, pos + window + 1)
+                logo_df = _make_logo_df(values_np[start:end])
+                logo_df.index = range(start, start + len(logo_df))
+                ax = axes[idx, 0]
+                logomaker.Logo(logo_df, ax=ax, color_scheme='classic',
+                               show_spines=True, baseline_width=0.5)
+                # Set y-limits: use custom if provided, otherwise use global/local min/max
+                if ylim is not None:
+                    _apply_ylim(ax, logo_df, ylim)
+                elif sharey and global_y_min is not None and global_y_max is not None:
+                    y_range = global_y_max - global_y_min
+                    if y_range > 0:
+                        ax.set_ylim(global_y_min - 0.1 * y_range, global_y_max + 0.1 * y_range)
+                else:
+                    _apply_ylim(ax, logo_df, None)
+                if labels_np is not None:
+                    _annotate_sites(ax, start, end)
+                else:
+                    ax.axvline(pos, color='red', linewidth=1.0, linestyle='--', alpha=0.7)
+                ax.set_xlabel('Sequence position', fontsize=10)
+                ax.set_ylabel(_ylabel(), fontsize=10)
+                ax.set_title(f'Position {pos}', fontsize=11)
+                ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+            if title:
+                fig.suptitle(title, fontsize=14, y=1.01)
+
+        plt.tight_layout()
+
+        if save_path is not None:
+            plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+            print(f"Sequence logo saved to: {save_path}")
+        else:
+            plt.show()
+
+        plt.close()
 
     def _apply_track_mask(self, head_output, mask: Tensor):
         """Slice output to only include masked tracks.
