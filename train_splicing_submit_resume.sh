@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=train-130GB
+#SBATCH --job-name=train-50kb-resume
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
-#SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:140GB
+#SBATCH --cpus-per-task=6
+#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
 #SBATCH --mem=24gb
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -51,16 +51,18 @@ WORK_DIR=${HOME}/projects/alphagenome_pytorch/
 # Inputs
 SUBSET="full"
 SPECIES="mouse_human"
-KB="130"
+KB="50"
 TRAINING_CONFIG=${WORK_DIR}/configs/splice_finetune_${SUBSET}_${KB}kb.yaml
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}_${KB}kb/${SPECIES}/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}_32kb/${SPECIES}/
 mkdir -p ${MODEL_DIR}
 echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Model directory: ${MODEL_DIR}"
 
 # Train the model
-python -u ${WORK_DIR}/train_splicing.py \
+python -u ${WORK_DIR}/train_splicing_old.py \
   --config ${TRAINING_CONFIG} \
-  > ${MODEL_DIR}/finetune_${TIMESTAMP}.log
+  --resume ${MODEL_DIR}/finetune.pt \
+> ${MODEL_DIR}/finetune_${TIMESTAMP}.log
+
 echo "Training completed at "$(date)

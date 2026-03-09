@@ -209,3 +209,4 @@ outputs/
 CLAUDE.md
 configs/
 notebooks/plots*
+slurm*
