@@ -117,8 +117,8 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         model.train()
 
         # Disable running_var updates in custom BatchRMSNorm layers
-        from alphagenome_pytorch.alphagenome import set_update_running_var
-        set_update_running_var(model, False)
+        # from alphagenome_pytorch.alphagenome import set_update_running_var
+        # set_update_running_var(model, False)
     
     total_loss = 0.0
     total_splice_logits_loss = 0.0
