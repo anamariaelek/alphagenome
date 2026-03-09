@@ -51,16 +51,24 @@ WORK_DIR=${HOME}/projects/alphagenome_pytorch/
 # Inputs
 SUBSET="full"
 SPECIES="mouse_human"
-KB="130"
-TRAINING_CONFIG=${WORK_DIR}/configs/splice_finetune_${SUBSET}_${KB}kb.yaml
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}_${KB}kb/${SPECIES}/
+KB=""
+if [ "$KB" != "" ]; then
+    SUBSET="${SUBSET}_${KB}kb"
+fi
+TRAINING_CONFIG=${WORK_DIR}/configs/splice_finetune_${SUBSET}.yaml
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}/${SPECIES}/
 mkdir -p ${MODEL_DIR}
 echo "Starting training job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
 echo "Model directory: ${MODEL_DIR}"
 
 # Train the model
-python -u ${WORK_DIR}/train_splicing.py \
+if [ "$KB" != "" ]; then
+    TRAIN_SCRIPT=${WORK_DIR}/train_splicing_windows.py
+else
+    TRAIN_SCRIPT=${WORK_DIR}/train_splicing_gene.py
+fi
+python -u ${TRAIN_SCRIPT} \
   --config ${TRAINING_CONFIG} \
   > ${MODEL_DIR}/finetune_${TIMESTAMP}.log
 echo "Training completed at "$(date)

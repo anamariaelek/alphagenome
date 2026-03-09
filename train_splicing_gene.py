@@ -30,7 +30,7 @@ from torch.amp import autocast, GradScaler
 
 from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig, TargetScaler, MultinomialLoss, JunctionsLoss, config
 from alphagenome_pytorch.data.splice_dataset import SpliceDataset
-from alphagenome_pytorch.samplers import SpeciesGroupedSampler
+from alphagenome_pytorch.samplers import SpeciesAndLengthGroupedSampler
 
 def exists(v):
     return v is not None
@@ -117,8 +117,8 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         model.train()
 
         # Disable running_var updates in custom BatchRMSNorm layers
-        # from alphagenome_pytorch.alphagenome import set_update_running_var
-        # set_update_running_var(model, False)
+        from alphagenome_pytorch.alphagenome import set_update_running_var
+        set_update_running_var(model, False)
     
     total_loss = 0.0
     total_splice_logits_loss = 0.0
@@ -887,8 +887,8 @@ def main():
         val_count = np.sum(val_species == organism_idx)
         print(f"  {organism_name}: {train_count} train, {val_count} val")
     
-    train_sampler = SpeciesGroupedSampler(train_subset, batch_size=batch_size, shuffle=True)
-    val_sampler = SpeciesGroupedSampler(val_subset, batch_size=batch_size, shuffle=False)
+    train_sampler = SpeciesAndLengthGroupedSampler(train_subset, batch_size=batch_size, shuffle=True)
+    val_sampler = SpeciesAndLengthGroupedSampler(val_subset, batch_size=batch_size, shuffle=False)
     
     train_loader = DataLoader(
         train_subset,

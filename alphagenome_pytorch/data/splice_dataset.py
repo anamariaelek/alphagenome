@@ -174,12 +174,12 @@ class SpliceDataset(Dataset):
 
         # Determine target length
         original_length = len(dna)
-        max_sequence_length = self.meta.get('max_sequence_length', 1048576)
-        if self.target_length is None:
+        max_sequence_length = int(self.meta.get('max_sequence_length', 1048576))
+        if self.target_length is None or str(self.target_length).lower() == 'none':
             # Round up to the nearest multiple of 2048
             target_length = int(np.ceil(original_length / 2048)) * 2048
         else:
-            target_length = self.target_length
+            target_length = int(self.target_length)
         target_length = min(target_length, max_sequence_length)
 
         # Crop/pad to target length

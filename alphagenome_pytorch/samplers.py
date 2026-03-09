@@ -58,7 +58,7 @@ class SpeciesGroupedSampler(BatchSampler):
         )
         return total_batches
 
-class SequenceGroupedSampler(BatchSampler):
+class LengthGroupedSampler(BatchSampler):
     """Sampler that groups sequences into batches by their effective target length.
 
     Each sequence is assigned to the smallest multiple of ``multiple`` (default
