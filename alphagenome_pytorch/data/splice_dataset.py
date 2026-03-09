@@ -2,9 +2,11 @@
 
 import os
 import json
+import gzip
 import numpy as np
 import pandas as pd
 import torch
+from Bio import SeqIO
 from torch.utils.data import Dataset
 
 
@@ -14,7 +16,7 @@ class SpliceDataset(Dataset):
     def __init__(
         self,
         data_dir,
-        target_length=4096,
+        target_length=None,
         max_donor_sites=20,
         max_acceptor_sites=20,
         species_mapping=None
@@ -22,7 +24,9 @@ class SpliceDataset(Dataset):
         """
         Args:
             data_dir: Directory containing memory-mapped data files
-            target_length: Target sequence length (must be power of 2)
+            target_length: Target sequence length. If None (default), each
+                sequence is padded/cropped to the smallest multiple of 2048
+                that is >= its length. Can also be an explicit int.
             max_donor_sites: Maximum number of donor sites per sequence
             max_acceptor_sites: Maximum number of acceptor sites per sequence
             species_mapping: Dict mapping species names to organism indices
@@ -53,11 +57,40 @@ class SpliceDataset(Dataset):
         # Sequences
         #
 
-        # Load sequences (one-hot encoded)
-        seq_path = os.path.join(self.data_dir, 'sequences.mmap')
-        seq_dtype = np.dtype(self.meta.get('sequences_dtype'))
-        seq_shape = tuple(self.meta.get('sequences_shape'))
-        self.sequences = np.memmap(seq_path, dtype=seq_dtype, mode='r', shape=seq_shape)
+        # Load sequences based on specified format
+        if self.meta.get('sequences_format') is None or self.meta.get('sequences_format') == 'mmap':
+            # Load sequences (one-hot encoded)
+            seq_path = os.path.join(self.data_dir, 'sequences.mmap')
+            seq_dtype = np.dtype(self.meta.get('sequences_dtype'))
+            seq_shape = tuple(self.meta.get('sequences_shape'))
+            self.sequences = np.memmap(seq_path, dtype=seq_dtype, mode='r', shape=seq_shape)
+            self.lengths = self.sequences.shape[1] if len(seq_shape) == 3 else self.sequences.shape[0]
+        elif self.meta.get('sequences_format') == 'fasta.gz' or self.meta.get('sequences_format') == 'fasta':
+            # Load sequences from fasta
+            fasta_path = os.path.join(self.data_dir, 'sequences.' + self.meta.get('sequences_format'))
+            opener = gzip.open if str(fasta_path).endswith('.gz') else open
+            self.sequences = []
+            self.lengths = []
+            with opener(fasta_path, 'rt') as f:
+                for record in SeqIO.parse(f, 'fasta'):    
+                    seq_str = str(record.seq).upper()
+                    # Store sequence lengths for bucketing
+                    self.lengths.append(len(seq_str))
+                    seq_array = np.zeros((len(seq_str), 4), dtype=np.uint8)
+                    for i, base in enumerate(seq_str):
+                        if base == 'A':
+                            seq_array[i, 0] = 1
+                        elif base == 'C':
+                            seq_array[i, 1] = 1
+                        elif base == 'G':
+                            seq_array[i, 2] = 1
+                        elif base == 'T':
+                            seq_array[i, 3] = 1
+                    self.sequences.append(seq_array)
+            # Keep as list — sequences may have different lengths
+        else:
+            raise ValueError(f"Unsupported sequences format: {self.meta.get('sequences_format')}")
+        
         # Keep context: do not crop here
         self.context_size = self.meta.get('context_size', 0)
         self.window_size = self.meta.get('window_size', 0)
@@ -118,7 +151,7 @@ class SpliceDataset(Dataset):
         print(f"Loaded dataset from {self.data_dir}")
 
     def __len__(self):
-        return len(self.sequences)
+        return self.sequences.shape[0] if isinstance(self.sequences, np.ndarray) else len(self.sequences)
     
     def __getitem__(self, idx):
         # Convert one-hot to integer encoding
@@ -139,20 +172,30 @@ class SpliceDataset(Dataset):
         else:
             dna = np.argmax(seq, axis=0)  # (seq_len,)
 
+        # Determine target length
+        original_length = len(dna)
+        max_sequence_length = self.meta.get('max_sequence_length', 1048576)
+        if self.target_length is None:
+            # Round up to the nearest multiple of 2048
+            target_length = int(np.ceil(original_length / 2048)) * 2048
+        else:
+            target_length = self.target_length
+        target_length = min(target_length, max_sequence_length)
+
         # Crop/pad to target length
         current_length = len(dna)
-        if current_length > self.target_length:
-            crop_start = (current_length - self.target_length) // 2
-            crop_end = crop_start + self.target_length
+        if current_length > target_length:
+            crop_start = (current_length - target_length) // 2
+            crop_end = crop_start + target_length
             dna_cropped = dna[crop_start:crop_end]
-        elif current_length < self.target_length:
+        elif current_length < target_length:
             crop_start = 0
             crop_end = current_length
-            padding = self.target_length - current_length
+            padding = target_length - current_length
             dna_cropped = np.pad(dna, (0, padding), constant_values=-1)
         else:
             crop_start = 0
-            crop_end = self.target_length
+            crop_end = target_length
             dna_cropped = dna
 
         # # Labels
@@ -169,10 +212,10 @@ class SpliceDataset(Dataset):
                 splice_labels_dense[pos] = label
         
         # Crop/pad splice labels to target length
-        if current_length > self.target_length:
+        if current_length > target_length:
             splice_labels_final = splice_labels_dense[crop_start:crop_end]
-        elif current_length < self.target_length:
-            padding = self.target_length - current_length
+        elif current_length < target_length:
+            padding = target_length - current_length
             splice_labels_final = np.pad(splice_labels_dense, (0, padding), constant_values=4)
         else:
             splice_labels_final = splice_labels_dense
@@ -223,15 +266,15 @@ class SpliceDataset(Dataset):
                 sse_value = row['sse']
                 if 0 <= position < current_length:
                     sse[position, condition_idx] = sse_value
-            if current_length > self.target_length:
+            if current_length > target_length:
                 sse_target = sse[crop_start:crop_end]
-            elif current_length < self.target_length:
-                padding = self.target_length - current_length
+            elif current_length < target_length:
+                padding = target_length - current_length
                 sse_target = np.pad(sse, ((0, padding), (0, 0)), constant_values=0)
             else:
                 sse_target = sse
         else:
-            sse_target = np.zeros((self.target_length, 1), dtype=np.float32)
+            sse_target = np.zeros((target_length, 1), dtype=np.float32)
 
         # Get conditions mask for this sequence (per-sequence depending on organism)
         conditions_mask_array = self.condition_map.get(organism_name, [])
@@ -247,15 +290,15 @@ class SpliceDataset(Dataset):
             gene_start_rel = gene_start_abs - window_with_context_start
             gene_end_rel = gene_end_abs - window_with_context_start
             # Adjust for cropping
-            if current_length > self.target_length:
+            if current_length > target_length:
                 gene_start_rel = gene_start_rel - crop_start
                 gene_end_rel = gene_end_rel - crop_start
             # Clamp to valid range
-            gene_start_rel = max(0, min(self.target_length, gene_start_rel))
-            gene_end_rel = max(0, min(self.target_length, gene_end_rel))
+            gene_start_rel = max(0, min(target_length, gene_start_rel))
+            gene_end_rel = max(0, min(target_length, gene_end_rel))
         else:
             gene_start_rel = 0
-            gene_end_rel = self.target_length
+            gene_end_rel = target_length
 
         return {
             'dna': torch.tensor(dna_cropped, dtype=torch.long),

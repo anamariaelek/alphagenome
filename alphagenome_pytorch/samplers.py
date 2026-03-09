@@ -57,3 +57,118 @@ class SpeciesGroupedSampler(BatchSampler):
             for indices in self.species_indices.values()
         )
         return total_batches
+
+class SequenceGroupedSampler(BatchSampler):
+    """Sampler that groups sequences into batches by their effective target length.
+
+    Each sequence is assigned to the smallest multiple of ``multiple`` (default
+    2048) that is >= its length, capping at ``max_sequence_length``.
+    """
+
+    def __init__(self, dataset, batch_size, shuffle=True, multiple=2048, max_len=1048576):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        def effective_length(orig_len):
+            return min(int(np.ceil(orig_len / multiple)) * multiple, max_len)
+
+        lengths = dataset.lengths
+        buckets = {}
+        if isinstance(lengths, (int, np.integer)):
+            # mmap datasets store a single scalar length shared by all samples
+            eff = effective_length(int(lengths))
+            buckets[eff] = list(range(len(dataset)))
+        else:
+            for i, L in enumerate(lengths):
+                eff = effective_length(int(L))
+                buckets.setdefault(eff, []).append(i)
+
+        self.buckets = list(buckets.values())
+
+    def __iter__(self):
+        import random
+
+        buckets = [list(b) for b in self.buckets]
+
+        if self.shuffle:
+            random.shuffle(buckets)
+
+        for bucket in buckets:
+            if self.shuffle:
+                random.shuffle(bucket)
+
+            for i in range(0, len(bucket), self.batch_size):
+                yield bucket[i:i + self.batch_size]
+
+    def __len__(self):
+        return sum(
+            (len(bucket) + self.batch_size - 1) // self.batch_size
+            for bucket in self.buckets
+        )
+
+
+class SpeciesAndLengthGroupedSampler(BatchSampler):
+    """Sampler that groups sequences so every batch shares both species and
+    effective target length.
+
+    Buckets are keyed by ``(organism_idx, effective_length)`` where
+    ``effective_length`` is the smallest multiple of ``multiple`` (default
+    2048) that is >= the sequence length, capped at ``max_sequence_length``.
+    """
+
+    def __init__(self, dataset, batch_size, shuffle=True, multiple=2048, max_len=1048576):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        def effective_length(orig_len):
+            return min(int(np.ceil(orig_len / multiple)) * multiple, max_len)
+
+        buckets = {}
+        for idx in range(len(dataset)):
+            # Unwrap Subset
+            if hasattr(dataset, 'dataset'):
+                base_dataset = dataset.dataset
+                actual_idx = dataset.indices[idx]
+            else:
+                base_dataset = dataset
+                actual_idx = idx
+
+            # --- species ---
+            species_id = base_dataset.species.iloc[actual_idx]
+            if isinstance(species_id, (int, np.integer)):
+                org_idx = int(species_id)
+            else:
+                org_idx = base_dataset.species_mapping.get(species_id, 0)
+
+            # --- length ---
+            lengths = base_dataset.lengths
+            orig_len = int(lengths) if isinstance(lengths, (int, np.integer)) else int(lengths[actual_idx])
+            eff_len = effective_length(orig_len)
+
+            key = (org_idx, eff_len)
+            buckets.setdefault(key, []).append(idx)
+
+        self.buckets = list(buckets.values())
+
+    def __iter__(self):
+        import random
+
+        buckets = [list(b) for b in self.buckets]
+
+        if self.shuffle:
+            random.shuffle(buckets)
+
+        for bucket in buckets:
+            if self.shuffle:
+                random.shuffle(bucket)
+
+            for i in range(0, len(bucket), self.batch_size):
+                yield bucket[i:i + self.batch_size]
+
+    def __len__(self):
+        return sum(
+            (len(bucket) + self.batch_size - 1) // self.batch_size
+            for bucket in self.buckets
+        )
