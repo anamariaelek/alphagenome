@@ -37,7 +37,7 @@ def exists(v):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_file", type=str)
+    parser.add_argument("--config", type=str)
     parser.add_argument("--resume", type=str, default=None, 
                        help="Path to checkpoint to resume training from")
     args = parser.parse_args()
@@ -463,7 +463,7 @@ def main():
     #
 
     args = parse_args()
-    config = load_config(args.config_file)
+    config = load_config(args.config)
     
     data_dir = config.get('data_dir', '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_adult_10kb/mouse_human/train/')
     output_dir = config.get('output_dir', '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/outputs/adult_10kb_mouse_human/')

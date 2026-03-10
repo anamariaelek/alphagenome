@@ -49,7 +49,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 WORK_DIR=${HOME}/projects/alphagenome_pytorch/
 
 # Inputs
-SUBSET="full"
+SUBSET="small"
 SPECIES="mouse_human"
 KB=""
 if [ "$KB" != "" ]; then

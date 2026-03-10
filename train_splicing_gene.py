@@ -35,7 +35,7 @@ def exists(v):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_file", type=str)
+    parser.add_argument("--config", type=str)
     parser.add_argument("--resume", type=str, default=None, 
                        help="Path to checkpoint to resume training from")
     args = parser.parse_args()
@@ -484,6 +484,7 @@ def resolve_progress_interval(total_batches, requested_interval=None):
     if total_batches <= 20:
         return 1
     return max(1, total_batches // 20)
+
 def main():
     # torch.autograd.set_detect_anomaly(True)  # Disable for performance
     start_time = time.time()
@@ -493,7 +494,7 @@ def main():
     #
 
     args = parse_args()
-    config = load_config(args.config_file)
+    config = load_config(args.config)
     
     data_dir = config.get('data_dir', '/home/elek/sds/sd17d003/Anamaria/splicevo/data_new/splits_adult_10kb/mouse_human/train/')
     output_dir = config.get('output_dir', '/home/elek/sds/sd17d003/Anamaria/alphagenome_pytorch/outputs/adult_10kb_mouse_human/')
@@ -571,6 +572,8 @@ def main():
     print(f"  Seed: {seed}")
     print(f"  Sequence length: {seq_len}")
     print(f"  Max sequence length: {max_sequence_length}")
+    print(f"  Max donor sites: {max_donor_sites}")
+    print(f"  Max acceptor sites: {max_acceptor_sites}")
     print(f"  Batch size: {batch_size}")
     print(f"  Gradient accumulation steps: {grad_accum_steps}")
     print(f"  Number of workers: {num_workers}")
