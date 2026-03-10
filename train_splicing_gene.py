@@ -491,8 +491,8 @@ def main():
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-    if torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction, device=0)
+    if torch.cuda.is_available() and gpu_mem_fraction is not None and float(gpu_mem_fraction) < 1.0:
+        torch.cuda.set_per_process_memory_fraction(float(gpu_mem_fraction), device=0)
 
     cache_dir = './outputs/checkpoints/pretrained/'
     seed = config.get('seed', 1950)
@@ -505,6 +505,7 @@ def main():
 
     # Config params
     seq_len = config.get('seq_len', 10240)
+    max_sequence_length = config.get('max_sequence_length', 1048576)
     batch_size = config.get('batch_size', 32)
     grad_accum_steps = config.get('grad_accum_steps', 1)
     epochs = config.get('epochs', 20)
@@ -549,7 +550,9 @@ def main():
     print("Configuration:")
     print(f"  Seed: {seed}")
     print(f"  Sequence length: {seq_len}")
+    print(f"  Max sequence length: {max_sequence_length}")
     print(f"  Batch size: {batch_size}")
+    print(f"  Gradient accumulation steps: {grad_accum_steps}")
     print(f"  Number of workers: {num_workers}")
     print(f"  Epochs: {epochs}")
     print(f"  Learning rate: {lr}")
@@ -843,6 +846,7 @@ def main():
     train_dataset = SpliceDataset(
         data_dir=data_dir,
         target_length=seq_len,
+        max_sequence_length=max_sequence_length,
         max_donor_sites=max_donor_sites,
         max_acceptor_sites=max_acceptor_sites,
         species_mapping=species_mapping
@@ -905,24 +909,28 @@ def main():
     train_sampler = SpeciesAndLengthGroupedSampler(train_subset, batch_size=batch_size, shuffle=True)
     val_sampler = SpeciesAndLengthGroupedSampler(val_subset, batch_size=batch_size, shuffle=False)
     
+    loader_prefetch_factor = int(config.get('prefetch_factor', 4))
+    loader_pin_memory = bool(config.get('pin_memory', True))
+    loader_persistent_workers = bool(config.get('persistent_workers', num_workers > 0)) and num_workers > 0
+
     train_loader = DataLoader(
         train_subset,
         batch_sampler=train_sampler,
-        persistent_workers=True if num_workers > 0 else False,
+        persistent_workers=loader_persistent_workers,
         num_workers=num_workers,
-        prefetch_factor=4,  # Higher prefetch keeps GPU fed
+        prefetch_factor=loader_prefetch_factor,
         timeout=600,  # Increased timeout from 60 to 600 seconds
-        pin_memory=True  # Enables fast CPU-GPU transfers
+        pin_memory=loader_pin_memory
     )
     
     val_loader = DataLoader(
         val_subset,
         batch_sampler=val_sampler,
-        persistent_workers=True if num_workers > 0 else False,
+        persistent_workers=loader_persistent_workers,
         num_workers=num_workers,
-        prefetch_factor=4,  # Higher prefetch keeps GPU fed
+        prefetch_factor=loader_prefetch_factor,
         timeout=600,  # Increased timeout from 60 to 600 seconds
-        pin_memory=True  # Enables fast CPU-GPU transfers
+        pin_memory=loader_pin_memory
     )
     loader_end_time = time.time()
     loader_duration = loader_end_time - data_time

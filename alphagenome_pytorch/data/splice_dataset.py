@@ -19,6 +19,7 @@ class SpliceDataset(Dataset):
         target_length=None,
         max_donor_sites=20,
         max_acceptor_sites=20,
+        max_sequence_length=1048576,
         species_mapping=None
     ):
         """
@@ -33,6 +34,7 @@ class SpliceDataset(Dataset):
         """
         self.data_dir = data_dir
         self.target_length = target_length
+        self.max_sequence_length = max_sequence_length
         self.max_donor_sites = max_donor_sites
         self.max_acceptor_sites = max_acceptor_sites
         
@@ -174,13 +176,13 @@ class SpliceDataset(Dataset):
 
         # Determine target length
         original_length = len(dna)
-        max_sequence_length = int(self.meta.get('max_sequence_length', 1048576))
         if self.target_length is None or str(self.target_length).lower() == 'none':
             # Round up to the nearest multiple of 2048
             target_length = int(np.ceil(original_length / 2048)) * 2048
         else:
             target_length = int(self.target_length)
-        target_length = min(target_length, max_sequence_length)
+        self.max_sequence_length = int(self.max_sequence_length)
+        target_length = min(target_length, self.max_sequence_length)
 
         # Crop/pad to target length
         current_length = len(dna)
