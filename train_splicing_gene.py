@@ -908,21 +908,21 @@ def main():
     train_loader = DataLoader(
         train_subset,
         batch_sampler=train_sampler,
-        persistent_workers=False,
+        persistent_workers=True if num_workers > 0 else False,
         num_workers=num_workers,
-        prefetch_factor=2,
+        prefetch_factor=4,  # Higher prefetch keeps GPU fed
         timeout=600,  # Increased timeout from 60 to 600 seconds
-        pin_memory=False  # Set pin_memory to False to avoid CPU-GPU transfer hang
+        pin_memory=True  # Enables fast CPU-GPU transfers
     )
     
     val_loader = DataLoader(
         val_subset,
         batch_sampler=val_sampler,
-        persistent_workers=False,
+        persistent_workers=True if num_workers > 0 else False,
         num_workers=num_workers,
-        prefetch_factor=2,
+        prefetch_factor=4,  # Higher prefetch keeps GPU fed
         timeout=600,  # Increased timeout from 60 to 600 seconds
-        pin_memory=False  # Set pin_memory to False to avoid CPU-GPU transfer hang
+        pin_memory=True  # Enables fast CPU-GPU transfers
     )
     loader_end_time = time.time()
     loader_duration = loader_end_time - data_time
