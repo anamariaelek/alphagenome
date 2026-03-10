@@ -11,8 +11,6 @@ import time
 import numpy as np
 import warnings
 
-from tests.test_selective_inference import model
-
 # Suppress warnings
 warnings.filterwarnings('ignore', message='Initializing zero-element tensors')
 warnings.filterwarnings('ignore', message='os.fork.*JAX')
@@ -94,7 +92,7 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1, activation_offload_to_cpu=False):
     if freeze_backbone:
 
         # First, set entire model to eval mode
@@ -138,7 +136,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         backward_times = []
         masking_times = []
         loss_calc_times = []
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     batch_idx = -1
     for batch in dataloader:
         batch_idx += 1
@@ -161,13 +159,25 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
 
         # Forward pass
         forward_t0 = time.time() if first_epoch else None
-        with autocast(device_type='cuda', enabled=use_amp):
-            preds = model(
-                dna,
-                organism_index,
-                splice_donor_idx=splice_donor_idx,
-                splice_acceptor_idx=splice_acceptor_idx
-            )
+        # Optional activation offloading keeps full-length training feasible by
+        # saving autograd tensors on CPU instead of GPU.
+        if activation_offload_to_cpu and hasattr(torch.autograd, 'graph') and hasattr(torch.autograd.graph, 'save_on_cpu'):
+            with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                with autocast(device_type='cuda', enabled=use_amp):
+                    preds = model(
+                        dna,
+                        organism_index,
+                        splice_donor_idx=splice_donor_idx,
+                        splice_acceptor_idx=splice_acceptor_idx
+                    )
+        else:
+            with autocast(device_type='cuda', enabled=use_amp):
+                preds = model(
+                    dna,
+                    organism_index,
+                    splice_donor_idx=splice_donor_idx,
+                    splice_acceptor_idx=splice_acceptor_idx
+                )
         forward_t1 = time.time() if first_epoch else None
         if first_epoch:
             forward_times.append(forward_t1 - forward_t0)
@@ -270,7 +280,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             if scheduler is not None and step_in_epoch > 0:
                 scheduler.step()
             step_in_epoch += 1
@@ -288,7 +298,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         else:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         if scheduler is not None and step_in_epoch > 0:
             scheduler.step()
         step_in_epoch += 1
@@ -314,7 +324,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         else:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         if scheduler is not None and step_in_epoch > 0:
             scheduler.step()
         step_in_epoch += 1
@@ -477,6 +487,10 @@ def main():
     gpu_mem_fraction = config.get('gpu_mem_fraction', 0.8)
     torch.set_num_threads(num_threads)
     torch.set_num_interop_threads(num_interop_threads)
+    torch.set_float32_matmul_precision('high')
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     if torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(gpu_mem_fraction, device=0)
 
@@ -811,7 +825,8 @@ def main():
         
         trainable_params = sum(p.numel() for p in model_pretrained.parameters() if p.requires_grad)
         print(f"Trainable parameters: {trainable_params:,}")
-
+        print(f"Allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+        print(f"Reserved:  {torch.cuda.memory_reserved()/1e9:.2f} GB")
     #
     # Train/validation split
     #
@@ -951,9 +966,12 @@ def main():
         'splice_sites_junctions': JunctionsLoss()
     }
 
-    # Set up GradScaler for mixed precision
-    scaler = GradScaler('cuda') if torch.cuda.is_available() else None
-    use_amp = False # torch.cuda.is_available()
+    # Set up memory-saving options for full-length transcript training
+    use_amp = bool(config.get('use_amp', torch.cuda.is_available()))
+    activation_offload_to_cpu = bool(config.get('activation_offload_to_cpu', True))
+    scaler = GradScaler('cuda') if (torch.cuda.is_available() and use_amp) else None
+    print(f"AMP enabled: {use_amp}")
+    print(f"Activation offload to CPU enabled: {activation_offload_to_cpu}")
 
     if resume_from_checkpoint:
         print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
@@ -983,7 +1001,8 @@ def main():
             scaler=scaler,
             use_amp=use_amp,
             freeze_backbone=freeze_backbone,
-            grad_accum_steps=grad_accum_steps
+            grad_accum_steps=grad_accum_steps,
+            activation_offload_to_cpu=activation_offload_to_cpu
         )
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
