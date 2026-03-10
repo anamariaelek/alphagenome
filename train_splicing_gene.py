@@ -92,7 +92,7 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1, activation_offload_to_cpu=False):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1, activation_offload_to_cpu=False, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
     if freeze_backbone:
 
         # First, set entire model to eval mode
@@ -137,6 +137,10 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         masking_times = []
         loss_calc_times = []
     optimizer.zero_grad(set_to_none=True)
+    total_batches_in_epoch = len(dataloader)
+    progress_interval_batches = resolve_progress_interval(total_batches_in_epoch, progress_interval_batches)
+    estimate_after_batches = max(1, int(estimate_after_batches))
+    epoch_wall_start = time.time()
     batch_idx = -1
     for batch in dataloader:
         batch_idx += 1
@@ -289,6 +293,28 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         if first_epoch:
             batch_times.append(time.time() - batch_start)
 
+        if num_batches >= estimate_after_batches:
+            should_log_progress = (
+                num_batches == estimate_after_batches
+                or num_batches % progress_interval_batches == 0
+                or num_batches == total_batches_in_epoch
+            )
+            if should_log_progress:
+                elapsed = time.time() - epoch_wall_start
+                avg_batch_time = elapsed / num_batches
+                eta_seconds = avg_batch_time * max(total_batches_in_epoch - num_batches, 0)
+                current_epoch_label = '?' if epoch_index is None else str(epoch_index + 1)
+                total_epochs_label = '?' if total_epochs is None else str(total_epochs)
+                running_loss = total_loss / max(num_batches, 1)
+                print(
+                    f"  Epoch {current_epoch_label}/{total_epochs_label} progress: "
+                    f"batch {num_batches}/{total_batches_in_epoch} "
+                    f"({100.0 * num_batches / total_batches_in_epoch:.1f}%) | "
+                    f"avg batch {avg_batch_time:.2f}s | "
+                    f"ETA {format_time(eta_seconds)} | "
+                    f"running loss {running_loss:.4f}"
+                )
+
     if num_batches % grad_accum_steps != 0:
         if scaler is not None and use_amp:
             scaler.unscale_(optimizer)
@@ -306,6 +332,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
     if first_epoch:
         print("\nTiming for first epoch:")
         print(f"  Avg batch time: {np.mean(batch_times):.3f}s")
+        print(f"  Estimated epoch time: {format_time(np.mean(batch_times) * total_batches_in_epoch)}")
         print(f"  Avg data load: {np.mean(data_times):.3f}s")
         print(f"  Avg forward:   {np.mean(forward_times):.3f}s")
         print(f"  Total forward: {np.sum(forward_times)/60:.3f}mins")
@@ -314,20 +341,6 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         print(f"  Avg backward:  {np.mean(backward_times):.3f}s")
         print(f"  Total backward: {np.sum(backward_times)/60:.3f}mins")
         train_one_epoch._first_epoch = False
-
-    if num_batches % grad_accum_steps != 0:
-        if scaler is not None and use_amp:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-        if scheduler is not None and step_in_epoch > 0:
-            scheduler.step()
-        step_in_epoch += 1
 
     avg_loss = total_loss / max(num_batches, 1)    
     avg_splice_juncs_loss = total_splice_juncs_loss / max(num_batches, 1)
@@ -464,6 +477,13 @@ def format_time(seconds):
     secs = int(seconds % 60)
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
+def resolve_progress_interval(total_batches, requested_interval=None):
+    """Choose a low-noise logging interval for batch progress."""
+    if requested_interval is not None:
+        return max(1, int(requested_interval))
+    if total_batches <= 20:
+        return 1
+    return max(1, total_batches // 20)
 def main():
     # torch.autograd.set_detect_anomaly(True)  # Disable for performance
     start_time = time.time()
@@ -977,9 +997,14 @@ def main():
     # Set up memory-saving options for full-length transcript training
     use_amp = bool(config.get('use_amp', torch.cuda.is_available()))
     activation_offload_to_cpu = bool(config.get('activation_offload_to_cpu', True))
+    progress_interval_batches = config.get('progress_interval_batches')
+    estimate_after_batches = config.get('estimate_after_batches', 5)
     scaler = GradScaler('cuda') if (torch.cuda.is_available() and use_amp) else None
     print(f"AMP enabled: {use_amp}")
     print(f"Activation offload to CPU enabled: {activation_offload_to_cpu}")
+    resolved_progress_interval = resolve_progress_interval(len(train_loader), progress_interval_batches)
+    print(f"Training progress log interval: every {resolved_progress_interval} batches")
+    print(f"Initial epoch ETA after: {max(1, int(estimate_after_batches))} batches")
 
     if resume_from_checkpoint:
         print(f"\nResuming training from epoch {start_epoch + 1} for {epochs - start_epoch} more epochs...")
@@ -1010,7 +1035,11 @@ def main():
             use_amp=use_amp,
             freeze_backbone=freeze_backbone,
             grad_accum_steps=grad_accum_steps,
-            activation_offload_to_cpu=activation_offload_to_cpu
+            activation_offload_to_cpu=activation_offload_to_cpu,
+            epoch_index=epoch,
+            total_epochs=epochs,
+            progress_interval_batches=progress_interval_batches,
+            estimate_after_batches=estimate_after_batches
         )
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
