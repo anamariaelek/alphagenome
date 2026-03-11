@@ -319,15 +319,15 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
 
     if first_epoch:
         print("\nTiming for first epoch:")
-        print(f"  Avg batch time: {np.mean(batch_times):.3f}s")
+        print(f"  Avg batch time: {np.mean(batch_times):.2f} s")
         print(f"  Estimated epoch time: {format_time(np.mean(batch_times) * total_batches_in_epoch)}")
-        print(f"  Avg data load: {np.mean(data_times):.3f}s")
-        print(f"  Avg forward:   {np.mean(forward_times):.3f}s")
-        print(f"  Total forward: {np.sum(forward_times)/60:.3f}mins")
-        print(f"  Avg loss:      {np.mean(loss_times):.3f}s")
-        print(f"  Total loss: {np.sum(loss_times)/60:.3f}mins")
-        print(f"  Avg backward:  {np.mean(backward_times):.3f}s")
-        print(f"  Total backward: {np.sum(backward_times)/60:.3f}mins\n")
+        print(f"  Avg data load: {np.mean(data_times):.2f} s")
+        print(f"  Avg forward:   {np.mean(forward_times):.2f} s")
+        print(f"  Total forward: {np.sum(forward_times)/60:.2f} mins")
+        print(f"  Avg loss:      {np.mean(loss_times):.2f}s")
+        print(f"  Total loss: {np.sum(loss_times)/60:.2f} mins")
+        print(f"  Avg backward:  {np.mean(backward_times):.2f} s")
+        print(f"  Total backward: {np.sum(backward_times)/60:.2f} mins\n")
         train_one_epoch._first_epoch = False
 
     if num_batches % grad_accum_steps != 0:

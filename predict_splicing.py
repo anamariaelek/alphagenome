@@ -164,14 +164,16 @@ from argparse import ArgumentParser
 
 parser = ArgumentParser()
 parser.add_argument('--config', type=str, help='Path to config file for finetuned model (YAML format)')
+parser.add_argument('--checkpoint', type=str, default=None, help='Path to model checkpoint file (overrides checkpoint derived from config)')
+parser.add_argument('--pretrained', action='store_true', help='Use pretrained model instead of checkpoint (overrides --checkpoint and --config)')
 parser.add_argument('--test-data', type=str, help='Optional path to test dataset directory (if not specified, test equivalent of train data_dir from config will be used)')
 parser.add_argument('--output-dir', type=str, help='Directory to save predictions and plots (if not specified, defaults to new directory "predictions" inside output_dir from config')
 parser.add_argument('--skip-prediction', action='store_true', help='Only run final aggregation/plotting, skip prediction loop')
 parser.add_argument('--skip-per-batch-plots', action='store_true', help='Do not save per-batch plots')
-parser.add_argument('--pretrained', action='store_true', help='Use pretrained model instead of finetuned')
-parser.add_argument('--verbose', action='store_true', help='Print detailed per-batch statistics')
 parser.add_argument('--batch_size', type=int, default=None, help='Override batch size from config')
 parser.add_argument('--max-batches', type=int, default=None, help='Maximum number of batches to process (default: all)')
+parser.add_argument('--from-batch', type=int, default=0, help='Resume predictions from this batch index (default: 0, i.e. start from beginning)')
+parser.add_argument('--verbose', action='store_true', help='Print detailed per-batch statistics')
 args = parser.parse_args()
 
 # Resources and parameters
@@ -182,6 +184,7 @@ gpu_mem_fraction = 0.5
 use_pretrained_model = args.pretrained
 use_finetuned_model = not args.pretrained
 max_batches = args.max_batches
+from_batch = args.from_batch
 
 species_mapping = {
     'human': 0,
@@ -253,6 +256,8 @@ if not args.skip_prediction:
         # Load the checkpoint
         model_name = config.get('model_name', 'alphagenome_finetuned')
         checkpoint_path = os.path.join(model_dir, f'{model_name}.pt')
+        if args.checkpoint is not None:
+            checkpoint_path = args.checkpoint
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
         # Load state dict
@@ -288,7 +293,9 @@ if not args.skip_prediction:
         target_length=target_length,
         max_donor_sites=max_donor_sites,
         max_acceptor_sites=max_acceptor_sites,
-        species_mapping=species_mapping
+        species_mapping=species_mapping,
+        load_alpha=True,
+        load_beta=True
     )
 
     meta_csv_fn = os.path.join(test_data_dir, 'metadata.csv')
@@ -375,6 +382,9 @@ if not args.skip_prediction:
             print("Splice usage target shape:", batch['splice_usage_target'].shape)
             print("Gene region shape:", batch['gene_region'].shape)
 
+        if batch_idx < from_batch:
+            continue
+
         if batch_idx >= max_batches:
             print(f"Reached max_batches={max_batches}")
             break
@@ -414,6 +424,14 @@ if not args.skip_prediction:
 
             # True usage
             splice_usage = batch['splice_usage_target'].to(device)
+
+            # True alpha and beta (if available)
+            alpha_target = batch.get('alpha_target')
+            if alpha_target is not None:
+                alpha_target = alpha_target.to(device)
+            beta_target = batch.get('beta_target')
+            if beta_target is not None:
+                beta_target = beta_target.to(device)
             
             # Gene region for masking
             gene_region = batch['gene_region'].to(device)
@@ -445,6 +463,10 @@ if not args.skip_prediction:
             organism_index = organism_index.cpu()
             splice_labels = splice_labels.cpu()
             splice_usage = splice_usage.cpu()
+            if alpha_target is not None:
+                alpha_target = alpha_target.cpu()
+            if beta_target is not None:
+                beta_target = beta_target.cpu()
             gene_region = gene_region.cpu()
             
             # Free GPU memory
@@ -778,6 +800,8 @@ if not args.skip_prediction:
                 'position': [],
                 'true_usage': [],
                 'pred_usage': [],
+                'true_alpha': [],
+                'true_beta': [],
                 'condition_idx': [],
                 'condition_name': [],
                 'tissue': [],
@@ -797,6 +821,8 @@ if not args.skip_prediction:
                 # Get organism-specific predictions and true values (already on CPU)
                 org_sse_pred = splice_usage_pred[org].sigmoid()
                 org_sse_true = splice_usage[org_mask]
+                org_alpha = alpha_target[org_mask] if alpha_target is not None else None
+                org_beta = beta_target[org_mask] if beta_target is not None else None
                 
                 # Get splice site positions for this organism
                 org_splice_mask = splice_site_mask[org_mask]
@@ -813,6 +839,8 @@ if not args.skip_prediction:
                 # Select only splice site positions
                 usage_true_at_sites = org_sse_true[org_splice_mask, :]
                 usage_pred_at_sites = org_sse_pred[org_splice_mask, :]
+                alpha_at_sites = org_alpha[org_splice_mask, :] if org_alpha is not None else None
+                beta_at_sites = org_beta[org_splice_mask, :] if org_beta is not None else None
                 
                 # Get condition indices for this organism
                 org_conds = species_conds[org]
@@ -823,6 +851,8 @@ if not args.skip_prediction:
                 # Convert to numpy once
                 true_vals = usage_true_at_sites  # shape: (num_sites, num_total_conditions)
                 pred_vals = usage_pred_at_sites  # shape: (num_sites, num_org_conditions)
+                alpha_vals = alpha_at_sites.numpy() if alpha_at_sites is not None else None
+                beta_vals = beta_at_sites.numpy() if beta_at_sites is not None else None
                 
                 # Build arrays for this organism
                 for cond_idx_pred, cond_idx_true in enumerate(org_conds):
@@ -834,6 +864,8 @@ if not args.skip_prediction:
                     data_arrays['position'].append(position_indices)
                     data_arrays['true_usage'].append(true_vals[:, cond_idx_true])
                     data_arrays['pred_usage'].append(pred_vals[:, cond_idx_pred])
+                    data_arrays['true_alpha'].append(alpha_vals[:, cond_idx_true] if alpha_vals is not None else np.full(num_sites, np.nan, dtype=np.float32))
+                    data_arrays['true_beta'].append(beta_vals[:, cond_idx_true] if beta_vals is not None else np.full(num_sites, np.nan, dtype=np.float32))
                     data_arrays['condition_idx'].append(np.full(num_sites, cond_idx_true, dtype=int))
                     data_arrays['condition_name'].append(np.full(num_sites, cond_name, dtype=object))
                     data_arrays['tissue'].append(np.full(num_sites, tissue, dtype=object))
@@ -849,6 +881,8 @@ if not args.skip_prediction:
                 'position': np.concatenate(data_arrays['position']),
                 'true_usage': np.concatenate(data_arrays['true_usage']),
                 'pred_usage': np.concatenate(data_arrays['pred_usage']),
+                'true_alpha': np.concatenate(data_arrays['true_alpha']),
+                'true_beta': np.concatenate(data_arrays['true_beta']),
                 'condition_idx': np.concatenate(data_arrays['condition_idx']),
                 'condition_name': np.concatenate(data_arrays['condition_name']),
                 'tissue': np.concatenate(data_arrays['tissue']),
@@ -921,6 +955,10 @@ if not args.skip_prediction:
             # Clear remaining references and free memory
             del splice_logits, splice_usage_pred, splice_labels_pred, splice_labels_true
             del organism_index, splice_labels, splice_usage
+            if 'alpha_target' in locals() and alpha_target is not None:
+                del alpha_target
+            if 'beta_target' in locals() and beta_target is not None:
+                del beta_target
             del batch  # Also delete the batch dict
             if 'all_data_df' in locals():
                 del all_data_df

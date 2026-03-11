@@ -20,7 +20,9 @@ class SpliceDataset(Dataset):
         max_donor_sites=20,
         max_acceptor_sites=20,
         max_sequence_length=1048576,
-        species_mapping=None
+        species_mapping=None,
+        load_alpha=False,
+        load_beta=False,
     ):
         """
         Args:
@@ -31,13 +33,17 @@ class SpliceDataset(Dataset):
             max_donor_sites: Maximum number of donor sites per sequence
             max_acceptor_sites: Maximum number of acceptor sites per sequence
             species_mapping: Dict mapping species names to organism indices
+            load_alpha: Whether to load alpha values
+            load_beta: Whether to load beta values
         """
         self.data_dir = data_dir
         self.target_length = target_length
         self.max_sequence_length = max_sequence_length
         self.max_donor_sites = max_donor_sites
         self.max_acceptor_sites = max_acceptor_sites
-        
+        self.load_alpha = load_alpha
+        self.load_beta = load_beta
+
         # Default species mapping
         self.species_mapping = species_mapping or {
             'human': 0,
@@ -262,21 +268,51 @@ class SpliceDataset(Dataset):
             n_conds = self.sse['condition_idx'].nunique()
             sse_seq = self.sse[self.sse['sample_idx'] == idx]
             sse = np.zeros((current_length, n_conds), dtype=np.float32)
+            if self.load_alpha:
+                alpha = np.zeros((current_length, n_conds), dtype=np.float32)
+            if self.load_beta:
+                beta = np.zeros((current_length, n_conds), dtype=np.float32)
             for _, row in sse_seq.iterrows():
                 position = int(row['position'])
                 condition_idx = int(row['condition_idx'])
                 sse_value = row['sse']
+                if self.load_alpha:
+                    alpha_value = row.get('alpha', 0)
+                    alpha_value = int(alpha_value) if alpha_value is not None else 0
+                if self.load_beta:
+                    beta_value = row.get('beta', 0)
+                    beta_value = int(beta_value) if beta_value is not None else 0
                 if 0 <= position < current_length:
                     sse[position, condition_idx] = sse_value
+                    if self.load_alpha:
+                        alpha[position, condition_idx] = alpha_value
+                    if self.load_beta:
+                        beta[position, condition_idx] = beta_value
             if current_length > target_length:
                 sse_target = sse[crop_start:crop_end]
+                if self.load_alpha:
+                    alpha_target = alpha[crop_start:crop_end]
+                if self.load_beta:
+                    beta_target = beta[crop_start:crop_end]
             elif current_length < target_length:
                 padding = target_length - current_length
                 sse_target = np.pad(sse, ((0, padding), (0, 0)), constant_values=0)
+                if self.load_alpha:
+                    alpha_target = np.pad(alpha, ((0, padding), (0, 0)), constant_values=0)
+                if self.load_beta:
+                    beta_target = np.pad(beta, ((0, padding), (0, 0)), constant_values=0)
             else:
                 sse_target = sse
+                if self.load_alpha:
+                    alpha_target = alpha
+                if self.load_beta:
+                    beta_target = beta
         else:
             sse_target = np.zeros((target_length, 1), dtype=np.float32)
+            if self.load_alpha:
+                alpha_target = np.zeros((target_length, 1), dtype=np.float32)
+            if self.load_beta:
+                beta_target = np.zeros((target_length, 1), dtype=np.float32)
 
         # Get conditions mask for this sequence (per-sequence depending on organism)
         conditions_mask_array = self.condition_map.get(organism_name, [])
@@ -302,7 +338,7 @@ class SpliceDataset(Dataset):
             gene_start_rel = 0
             gene_end_rel = target_length
 
-        return {
+        return_dict = {
             'dna': torch.tensor(dna_cropped, dtype=torch.long),
             'organism_index': torch.tensor(organism_idx, dtype=torch.long),
             'splice_donor_idx': torch.tensor(donor_padded, dtype=torch.long),
@@ -314,3 +350,9 @@ class SpliceDataset(Dataset):
             'conditions_mask': torch.tensor(conditions_mask_array, dtype=torch.long),  # (num_contexts,)
             'gene_region': torch.tensor([gene_start_rel, gene_end_rel], dtype=torch.long),  # [start, end] relative to sequence
         }
+        if self.load_alpha:
+            return_dict['alpha_target'] = torch.tensor(alpha_target, dtype=torch.float32)
+        if self.load_beta:
+            return_dict['beta_target'] = torch.tensor(beta_target, dtype=torch.float32)
+        
+        return return_dict

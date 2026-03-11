@@ -50,10 +50,10 @@ WORK_DIR=${HOME}/projects/alphagenome_pytorch/
 
 # Inputs
 SUBSET="full"
-SPECIES="mouse_human"
-KB="50"
+SPECIES="mouse_human_freeze"
+KB="32"
 TRAINING_CONFIG=${WORK_DIR}/configs/splice_finetune_${SUBSET}_${KB}kb.yaml
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}_${KB}kb/${SPECIES}_A40/
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}_${KB}kb/${SPECIES}/
 mkdir -p ${MODEL_DIR}
 echo "Starting prediction job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
@@ -62,5 +62,5 @@ echo "Model directory: ${MODEL_DIR}"
 # Train the model
 python -u ${WORK_DIR}/predict_splicing.py \
   --config ${TRAINING_CONFIG} --batch_size 32 \
-  > ${MODEL_DIR}/predict_${TIMESTAMP}.log
+  > ${MODEL_DIR}/predict_heads_${TIMESTAMP}.log
 echo "Prediction completed at "$(date)
