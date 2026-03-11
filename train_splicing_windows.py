@@ -11,8 +11,6 @@ import time
 import numpy as np
 import warnings
 
-from tests.test_selective_inference import model
-
 # Suppress warnings
 warnings.filterwarnings('ignore', message='Initializing zero-element tensors')
 warnings.filterwarnings('ignore', message='os.fork.*JAX')
@@ -94,7 +92,7 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
     if freeze_backbone:
 
         # First, set entire model to eval mode
@@ -139,6 +137,10 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         masking_times = []
         loss_calc_times = []
     optimizer.zero_grad()
+    total_batches_in_epoch = len(dataloader)
+    progress_interval_batches = resolve_progress_interval(total_batches_in_epoch, progress_interval_batches)
+    estimate_after_batches = max(1, int(estimate_after_batches))
+    epoch_wall_start = time.time()
     batch_idx = -1
     for batch in dataloader:
         batch_idx += 1
@@ -244,7 +246,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 losses.append(splice_juncs_loss * 0)
                 total_splice_juncs_loss += splice_juncs_loss.item()
         if len(losses) == 0:
-            print(f"No losses computed for batch {batch_idx}!")
+            #print(f"No losses computed for batch {batch_idx}!")
             continue
         loss = torch.stack(losses).sum()
         loss = loss / grad_accum_steps
@@ -279,6 +281,28 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
         if first_epoch:
             batch_times.append(time.time() - batch_start)
 
+        if num_batches >= estimate_after_batches:
+            should_log_progress = (
+                num_batches == estimate_after_batches
+                or num_batches % progress_interval_batches == 0
+                or num_batches == total_batches_in_epoch
+            )
+            if should_log_progress:
+                elapsed = time.time() - epoch_wall_start
+                avg_batch_time = elapsed / num_batches
+                eta_seconds = avg_batch_time * max(total_batches_in_epoch - num_batches, 0)
+                current_epoch_label = '?' if epoch_index is None else str(epoch_index + 1)
+                total_epochs_label = '?' if total_epochs is None else str(total_epochs)
+                running_loss = total_loss / max(num_batches, 1)
+                print(
+                    f"Epoch {current_epoch_label}/{total_epochs_label} progress: "
+                    f"batch {num_batches}/{total_batches_in_epoch} "
+                    f"({100.0 * num_batches / total_batches_in_epoch:.1f}%) | "
+                    f"avg batch {avg_batch_time:.2f}s | "
+                    f"ETA {format_time(eta_seconds)} | "
+                    f"running loss {running_loss:.4f}"
+                )
+
     if num_batches % grad_accum_steps != 0:
         if scaler is not None and use_amp:
             scaler.unscale_(optimizer)
@@ -296,13 +320,14 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
     if first_epoch:
         print("\nTiming for first epoch:")
         print(f"  Avg batch time: {np.mean(batch_times):.3f}s")
+        print(f"  Estimated epoch time: {format_time(np.mean(batch_times) * total_batches_in_epoch)}")
         print(f"  Avg data load: {np.mean(data_times):.3f}s")
         print(f"  Avg forward:   {np.mean(forward_times):.3f}s")
         print(f"  Total forward: {np.sum(forward_times)/60:.3f}mins")
         print(f"  Avg loss:      {np.mean(loss_times):.3f}s")
         print(f"  Total loss: {np.sum(loss_times)/60:.3f}mins")
         print(f"  Avg backward:  {np.mean(backward_times):.3f}s")
-        print(f"  Total backward: {np.sum(backward_times)/60:.3f}mins")
+        print(f"  Total backward: {np.sum(backward_times)/60:.3f}mins\n")
         train_one_epoch._first_epoch = False
 
     if num_batches % grad_accum_steps != 0:
@@ -327,7 +352,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
     return avg_loss, avg_splice_logits_loss, avg_splice_usage_loss, avg_splice_juncs_loss
 
 @torch.no_grad()
-def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cuda', use_amp=True):
+def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cuda', use_amp=True, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
     """Run validation and return average loss."""
     model.eval()
 
@@ -340,6 +365,10 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
     total_splice_usage_loss = 0.0
     total_splice_juncs_loss = 0.0
     num_batches = 0
+    total_batches_in_epoch = len(val_loader)
+    progress_interval_batches = resolve_progress_interval(total_batches_in_epoch, progress_interval_batches)
+    estimate_after_batches = max(1, int(estimate_after_batches))
+    epoch_wall_start = time.time()
 
     for batch in val_loader:
         dna = batch['dna'].to(device)
@@ -440,6 +469,28 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
             total_loss += loss.item()
             num_batches += 1
 
+            if num_batches >= estimate_after_batches:
+                should_log_progress = (
+                    num_batches == estimate_after_batches
+                    or num_batches % progress_interval_batches == 0
+                    or num_batches == total_batches_in_epoch
+                )
+                if should_log_progress:
+                    elapsed = time.time() - epoch_wall_start
+                    avg_batch_time = elapsed / num_batches
+                    eta_seconds = avg_batch_time * max(total_batches_in_epoch - num_batches, 0)
+                    current_epoch_label = '?' if epoch_index is None else str(epoch_index + 1)
+                    total_epochs_label = '?' if total_epochs is None else str(total_epochs)
+                    running_loss = total_loss / max(num_batches, 1)
+                    print(
+                        f"  Validation {current_epoch_label}/{total_epochs_label} progress: "
+                        f"batch {num_batches}/{total_batches_in_epoch} "
+                        f"({100.0 * num_batches / total_batches_in_epoch:.1f}%) | "
+                        f"avg batch {avg_batch_time:.2f}s | "
+                        f"ETA {format_time(eta_seconds)} | "
+                        f"running loss {running_loss:.4f}"
+                    )
+
     avg_loss = total_loss / max(num_batches, 1)
     avg_splice_logits_loss = total_splice_logits_loss / max(num_batches, 1)  
     avg_splice_usage_loss = total_splice_usage_loss / max(num_batches, 1)    
@@ -453,6 +504,14 @@ def format_time(seconds):
     mins = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
     return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+
+def resolve_progress_interval(total_batches, requested_interval=None):
+    """Choose a low-noise logging interval for batch progress."""
+    if requested_interval is not None:
+        return max(1, int(requested_interval))
+    if total_batches <= 20:
+        return 1
+    return max(1, total_batches // 20)
 
 def main():
     # torch.autograd.set_detect_anomaly(True)  # Disable for performance
@@ -494,6 +553,8 @@ def main():
     batch_size = config.get('batch_size', 32)
     grad_accum_steps = config.get('grad_accum_steps', 1)
     epochs = config.get('epochs', 20)
+    progress_interval_batches = config.get('progress_interval_batches')
+    estimate_after_batches = config.get('estimate_after_batches', 5)
     lr = config.get('lr', 1e-5)
     validation_fraction = config.get('validation_fraction', 0.2)
     max_donor_sites = config.get('max_donor_sites', 20)
@@ -535,7 +596,10 @@ def main():
     print("Configuration:")
     print(f"  Seed: {seed}")
     print(f"  Sequence length: {seq_len}")
+    print(f"  Max donor sites: {max_donor_sites}")
+    print(f"  Max acceptor sites: {max_acceptor_sites}")
     print(f"  Batch size: {batch_size}")
+    print(f"  Gradient accumulation steps: {grad_accum_steps}")
     print(f"  Number of workers: {num_workers}")
     print(f"  Epochs: {epochs}")
     print(f"  Learning rate: {lr}")
@@ -962,7 +1026,7 @@ def main():
 
     print(f"Train size: {train_size}, Validation size: {val_size}")
     print(f"Train batches per epoch: {len(train_loader)}")
-    print(f"Validation batches per epoch: {len(val_loader)}")
+    print(f"Validation batches per epoch: {len(val_loader)}\n")
     best_val_loss = float('inf')
     patience = 5
     epochs_without_improvement = 0
@@ -983,7 +1047,11 @@ def main():
             scaler=scaler,
             use_amp=use_amp,
             freeze_backbone=freeze_backbone,
-            grad_accum_steps=grad_accum_steps
+            grad_accum_steps=grad_accum_steps,
+            epoch_index=epoch,
+            total_epochs=epochs,
+            progress_interval_batches=progress_interval_batches,
+            estimate_after_batches=estimate_after_batches
         )
         msg = f"Train Loss: {avg_train_loss:.4f} "
         msg += f"(Splice: {splice_logits_loss:.4f}, "
@@ -996,7 +1064,11 @@ def main():
             loss_fns=loss_fns,
             species_mapping=species_mapping,
             device=device,
-            use_amp=use_amp
+            use_amp=use_amp,
+            epoch_index=epoch,
+            total_epochs=epochs,
+            progress_interval_batches=progress_interval_batches,
+            estimate_after_batches=estimate_after_batches
         )
         msg += f"Val Loss: {avg_val_loss:.4f} "
         msg += f"(Splice: {val_logits_loss:.4f}, "
