@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=train
+#SBATCH --job-name=train-512
 #SBATCH --partition=gpu-single 
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:1,gpumem_per_gpu:80GB
-#SBATCH --mem=80gb
-#SBATCH --time=12:00:00
+#SBATCH --gres=gpu:1,gpumem_per_gpu:141GB
+#SBATCH --mem=140gb
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -51,7 +51,7 @@ WORK_DIR=${HOME}/projects/alphagenome_pytorch/
 # Inputs
 SUBSET="full"
 SPECIES="mouse_human"
-KB=""
+KB="512"
 if [ "$KB" != "" ]; then
     SUBSET="${SUBSET}_${KB}kb"
 fi

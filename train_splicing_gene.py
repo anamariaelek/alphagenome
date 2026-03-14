@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader, Subset
 from torch.amp import autocast, GradScaler
 
 from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig, TargetScaler, MultinomialLoss, JunctionsLoss, config
+from alphagenome_pytorch.alphagenome import set_update_running_var
 from alphagenome_pytorch.data.splice_dataset import SpliceDataset
 from alphagenome_pytorch.samplers import SpeciesAndLengthGroupedSampler
 
@@ -92,7 +93,7 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, grad_accum_steps=1, activation_offload_to_cpu=False, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, updt_running_var=False, grad_accum_steps=1, activation_offload_to_cpu=False, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
     if freeze_backbone:
 
         # First, set entire model to eval mode
@@ -108,15 +109,14 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 for head_name, head in heads.items():
                     if head_name in heads_to_train:
                         head.train()
-                        # Re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
-                        set_update_running_var(head, True)
+                        # Optionally re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
+                        set_update_running_var(head, updt_running_var)
     else:
         # Set entire model to train mode
         model.train()
 
         # Disable running_var updates in custom BatchRMSNorm layers
-        from alphagenome_pytorch.alphagenome import set_update_running_var
-        set_update_running_var(model, False)
+        set_update_running_var(model, updt_running_var)
     
     total_loss = 0.0
     total_splice_logits_loss = 0.0
@@ -355,7 +355,6 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
     model.eval()
 
     # Disable running_var updates in custom BatchRMSNorm layers
-    from alphagenome_pytorch.alphagenome import set_update_running_var
     set_update_running_var(model, False)
     
     total_loss = 0.0
@@ -565,6 +564,7 @@ def main():
     load_pretrained = config.get('load_pretrained', False)
     pretrained_model_version = config.get('pretrained_model_version', 'all_folds')
     freeze_backbone = config.get('freeze_backbone', False)
+    updt_running_var = config.get('update_running_var', False)
     heads_to_train = config.get('heads_to_train', ['splice_sites_classification', 'splice_sites_usage'])  # Specify which heads to train
     if heads_to_train == 'all':
         heads_to_train = None  # Train all heads
@@ -613,6 +613,7 @@ def main():
     if load_pretrained:
         print(f"  Pretrained model version: {pretrained_model_version}")
         print(f"  Freeze backbone: {freeze_backbone}") 
+        print(f"  Update RSMNorm variance: {updt_running_var}")
     print("  Model architecture:")
     print(f"    Dims: {dims}")
     print(f"    Basepairs: {basepairs}")
@@ -1063,6 +1064,7 @@ def main():
             scaler=scaler,
             use_amp=use_amp,
             freeze_backbone=freeze_backbone,
+            updt_running_var=updt_running_var,
             grad_accum_steps=grad_accum_steps,
             activation_offload_to_cpu=activation_offload_to_cpu,
             epoch_index=epoch,

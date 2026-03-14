@@ -4,9 +4,9 @@
 #SBATCH --nodes=1 
 #SBATCH --ntasks=1 
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:A40:1
+#SBATCH --gres=gpu:1,gpumem_per_gpu:40GB
 #SBATCH --mem=40gb
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=slurm_%j.log
 #SBATCH --error=slurm_%j.err
 # 
@@ -50,17 +50,31 @@ WORK_DIR=${HOME}/projects/alphagenome_pytorch/
 
 # Inputs
 SUBSET="full"
-SPECIES="mouse_human_freeze"
-KB="32"
-TRAINING_CONFIG=${WORK_DIR}/configs/splice_finetune_${SUBSET}_${KB}kb.yaml
-MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}_${KB}kb/${SPECIES}/
-mkdir -p ${MODEL_DIR}
+SPECIES="mouse_human"
+KB=""
+if [ "$KB" != "" ]; then
+    SUBSET="${SUBSET}_${KB}kb"
+fi
+TRAINING_CONFIG=${WORK_DIR}/configs/splice_finetune_${SUBSET}.yaml
+MODEL_DIR=${HOME}/sds/sd17d003/Anamaria/alphagenome_pytorch/${SUBSET}/${SPECIES}/
+CHECKPOINT=${MODEL_DIR}/finetune_heads.pt
+OUTPUT_DIR=${MODEL_DIR}/predictions_finetune_heads
+mkdir -p ${OUTPUT_DIR}
 echo "Starting prediction job at "$(date)
 echo "Training config: ${TRAINING_CONFIG}"
-echo "Model directory: ${MODEL_DIR}"
+echo "Checkpoint: ${CHECKPOINT}"
+echo "Model directory: ${OUTPUT_DIR}"
 
 # Train the model
-python -u ${WORK_DIR}/predict_splicing.py \
-  --config ${TRAINING_CONFIG} --batch_size 32 \
-  > ${MODEL_DIR}/predict_heads_${TIMESTAMP}.log
+if [ "$KB" != "" ]; then
+    PREDICT_SCRIPT=${WORK_DIR}/predict_splicing_windows.py
+else
+    PREDICT_SCRIPT=${WORK_DIR}/predict_splicing_gene.py
+fi
+python -u ${PREDICT_SCRIPT} \
+  --config ${TRAINING_CONFIG} \
+  --checkpoint ${CHECKPOINT}\
+  --output-dir ${OUTPUT_DIR} \
+  --batch_size 16 \
+  > ${OUTPUT_DIR}/predict_${TIMESTAMP}.log
 echo "Prediction completed at "$(date)

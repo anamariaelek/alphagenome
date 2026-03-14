@@ -988,6 +988,19 @@ print("\n" + "="*60)
 print("Generating Final Aggregated Plots")
 print("="*60)
 
+# When skipping prediction, load per-batch files from disk
+if args.skip_prediction:
+    import glob
+    print("Loading per-batch splice site prediction files from disk...")
+    splice_files = sorted(glob.glob(f"{per_batch_dir}/splice_site_predictions_batch_*.csv.gz"))
+    if splice_files:
+        all_splice_predictions = [pd.read_csv(f, compression='gzip') for f in splice_files]
+        print(f"  Loaded {len(splice_files)} splice site prediction files")
+    usage_files = sorted(glob.glob(f"{per_batch_dir}/splice_usage_batch_*.csv.gz"))
+    if usage_files:
+        all_usage_predictions = [pd.read_csv(f, compression='gzip') for f in usage_files]
+        print(f"  Loaded {len(usage_files)} usage prediction files")
+
 # Concatenate all splice predictions (including flushed data)
 print("\nCreating final splice site classification plots...")
 
