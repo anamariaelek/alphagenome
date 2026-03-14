@@ -937,7 +937,8 @@ class TransformerTower(Module):
         single_to_pairwise_heads = 32,          # they did 32
         pool_size = 16,
         attn_kwargs: dict = dict(),
-        ff_kwargs: dict = dict()
+        ff_kwargs: dict = dict(),
+        use_gradient_checkpointing = False,
     ):
         super().__init__()
         dim_pairwise = default(dim_pairwise, dim)
@@ -1001,12 +1002,12 @@ class TransformerTower(Module):
 
         # accessible attributes
         self.dim_pairwise = dim_pairwise
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
-    def forward(
-        self,
-        single
-    ):
-
+    def _forward_layers(self, single):
+        """Core transformer loop. Extracted so the entire body can be wrapped
+        in gradient checkpointing to avoid storing large intermediate activations
+        (especially the O(n^2) pairwise tensors) at 512 kb sequence length."""
         seq_len = single.shape[1]
 
         pairwise = None
@@ -1037,6 +1038,15 @@ class TransformerTower(Module):
             single = ff(single) + single
 
         return single, pairwise
+
+    def forward(
+        self,
+        single
+    ):
+        if self.use_gradient_checkpointing and self.training:
+            from torch.utils.checkpoint import checkpoint
+            return checkpoint(self._forward_layers, single, use_reentrant=False)
+        return self._forward_layers(single)
 
 # transformer unet
 
