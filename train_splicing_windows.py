@@ -93,7 +93,7 @@ def get_organism_name(organism_idx, species_mapping):
             return name
     return f'organism_{organism_idx}'
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, updt_running_var=False, grad_accum_steps=1, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapping, heads_to_train=None, scheduler=None, scaler=None, use_amp=True, freeze_backbone=False, freeze_n_conv_blocks=0, updt_running_var=False, grad_accum_steps=1, epoch_index=None, total_epochs=None, progress_interval_batches=None, estimate_after_batches=5):
     if freeze_backbone:
 
         # First, set entire model to eval mode
@@ -110,6 +110,23 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                         head.train()
                         # Optionally re-enable running_var updates for trainable heads only (if they have BatchRMSNorm)
                         set_update_running_var(head, updt_running_var)
+    elif freeze_n_conv_blocks > 0:
+        # Set entire model to train mode first, then put the frozen conv blocks back to eval mode
+        # so their BatchRMSNorm layers use running stats (not batch stats) and dropout is disabled.
+        model.train()
+        set_update_running_var(model, updt_running_var)
+
+        unet = model.transformer_unet
+        num_down = len(unet.downs)
+        n = min(freeze_n_conv_blocks, num_down)
+        unet.dna_embed.eval()
+        set_update_running_var(unet.dna_embed, False)
+        for i in range(n):
+            unet.downs[i].eval()
+            set_update_running_var(unet.downs[i], False)
+            mirror_idx = num_down - 1 - i
+            unet.ups[mirror_idx].eval()
+            set_update_running_var(unet.ups[mirror_idx], False)
     else:
         # Set entire model to train mode
         model.train()
@@ -294,7 +311,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, device, species_mapp
                 total_epochs_label = '?' if total_epochs is None else str(total_epochs)
                 running_loss = total_loss / max(num_batches, 1)
                 print(
-                    f"Epoch {current_epoch_label}/{total_epochs_label} progress: "
+                    f"Epoch {current_epoch_label}/{total_epochs_label} training: "
                     f"batch {num_batches}/{total_batches_in_epoch} "
                     f"({100.0 * num_batches / total_batches_in_epoch:.1f}%) | "
                     f"avg batch {avg_batch_time:.2f}s | "
@@ -481,7 +498,7 @@ def validate_one_epoch(model, val_loader, loss_fns, species_mapping, device='cud
                     total_epochs_label = '?' if total_epochs is None else str(total_epochs)
                     running_loss = total_loss / max(num_batches, 1)
                     print(
-                        f"  Validation {current_epoch_label}/{total_epochs_label} progress: "
+                        f"Epoch {current_epoch_label}/{total_epochs_label} validation: "
                         f"batch {num_batches}/{total_batches_in_epoch} "
                         f"({100.0 * num_batches / total_batches_in_epoch:.1f}%) | "
                         f"avg batch {avg_batch_time:.2f}s | "
@@ -562,6 +579,7 @@ def main():
     load_pretrained = config.get('load_pretrained', False)
     pretrained_model_version = config.get('pretrained_model_version', 'all_folds')
     freeze_backbone = config.get('freeze_backbone', False)
+    freeze_n_conv_blocks = config.get('freeze_n_conv_blocks', 0)  # freeze N outermost (highest-res) down+up block pairs
     updt_running_var = config.get('update_running_var', False)
     heads_to_train = config.get('heads_to_train', ['splice_sites_classification', 'splice_sites_usage'])  # Specify which heads to train
     if heads_to_train == 'all':
@@ -609,7 +627,8 @@ def main():
     print(f"  Load pretrained: {load_pretrained}")
     if load_pretrained:
         print(f"  Pretrained model version: {pretrained_model_version}")
-        print(f"  Freeze backbone: {freeze_backbone}") 
+        print(f"  Freeze backbone: {freeze_backbone}")
+        print(f"  Freeze N conv blocks: {freeze_n_conv_blocks}")
         print(f"  Update RSMNorm variance: {updt_running_var}")
     print("  Model architecture:")
     print(f"    Dims: {dims}")
@@ -875,6 +894,32 @@ def main():
         
         trainable_params = sum(p.numel() for p in model_pretrained.parameters() if p.requires_grad)
         print(f"Trainable parameters: {trainable_params:,}")
+    elif freeze_n_conv_blocks > 0:
+        # Partial freeze: keep the N outermost (highest-resolution) down + up block pairs frozen.
+        # These blocks process the widest (most memory-expensive) sequence scales and learn
+        # universal low-level motifs (GT-AG, polypyrimidine tract, branch point) that don't
+        # need updating for tissue-specific splicing. Everything closer to the transformer
+        # (upper conv blocks, transformer itself, output embeddings, heads) stays trainable.
+        unet = model_pretrained.transformer_unet
+        num_down = len(unet.downs)
+        n = min(freeze_n_conv_blocks, num_down)
+
+        # Freeze DNA embedding + the N lowest down-path blocks
+        print(f"Freezing DNA embedding and {n} outermost down+up conv block pairs...")
+        for param in unet.dna_embed.parameters():
+            param.requires_grad = False
+
+        for i in range(n):
+            for param in unet.downs[i].parameters():
+                param.requires_grad = False
+            # Corresponding up blocks mirror in reverse: up[num_down-1-i] pairs with down[i]
+            mirror_idx = num_down - 1 - i
+            for param in unet.ups[mirror_idx].parameters():
+                param.requires_grad = False
+
+        total_params = sum(p.numel() for p in model_pretrained.parameters())
+        trainable_params = sum(p.numel() for p in model_pretrained.parameters() if p.requires_grad)
+        print(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.1f}%)")
 
     #
     # Train/validation split
@@ -1047,6 +1092,7 @@ def main():
             scaler=scaler,
             use_amp=use_amp,
             freeze_backbone=freeze_backbone,
+            freeze_n_conv_blocks=freeze_n_conv_blocks,
             updt_running_var=updt_running_var,
             grad_accum_steps=grad_accum_steps,
             epoch_index=epoch,
