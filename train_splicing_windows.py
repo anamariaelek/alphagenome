@@ -921,6 +921,17 @@ def main():
         trainable_params = sum(p.numel() for p in model_pretrained.parameters() if p.requires_grad)
         print(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.1f}%)")
 
+    # Optional torch.compile on the backbone for kernel fusion (speed only, no memory reduction).
+    # Compiles only transformer_unet since the heads are tiny and sequence length is fixed.
+    use_compile = bool(config.get('use_compile', False))
+    if use_compile:
+        print("Compiling transformer_unet with torch.compile (this may take a few minutes on the first batch)...")
+        model_pretrained.transformer_unet = torch.compile(
+            model_pretrained.transformer_unet,
+            mode='reduce-overhead',
+            dynamic=False
+        )
+        print("torch.compile done.")
     #
     # Train/validation split
     #
